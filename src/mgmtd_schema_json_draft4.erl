@@ -11,7 +11,7 @@ load_file(File) ->
 
 load_file(File, Opts) ->
     {ok, Bin} = file:read_file(File),
-    Schema = jsx:decode(Bin, [return_maps]),
+    Schema = json:decode(Bin),
     ok = load_json_schema(Schema, Opts).
 
 load_json_schema(#{<<"$schema">> := <<"http://json-schema.org/draft-04/schema#">>} = Schema,
