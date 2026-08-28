@@ -100,13 +100,17 @@ drop_path_prefix(Path, Rows) ->
 set(#cfg_txn{ets_copy = Copy, ops = Ops} = Txn, Path, Value) ->
     case mgmtd_schema:cast_value(Path, Value) of
         {ok, InternalValue} ->
-            case mgmtd_cfg_db:check_conflict({ets, Copy}, Path, InternalValue) of
-                ok ->
-                    mgmtd_cfg_db:insert_path_items({ets, Copy}, Path, InternalValue),
-                    %%v?DBG("ets content: ~p~n",[ets:tab2list(Copy)]),
-                    {ok, Txn#cfg_txn{ops = [{set, Path, InternalValue} | Ops]}};
+            case mgmtd_schema:cast_list_key_values(Path) of
+                {ok, Path1} ->
+                    case mgmtd_cfg_db:check_conflict({ets, Copy}, Path1, InternalValue) of
+                        ok ->
+                            mgmtd_cfg_db:insert_path_items({ets, Copy}, Path1, InternalValue),
+                            {ok, Txn#cfg_txn{ops = [{set, Path1, InternalValue} | Ops]}};
+                        {error, Reason} ->
+                            ?DBG(Reason),
+                            {error, Reason}
+                    end;
                 {error, Reason} ->
-                    ?DBG(Reason),
                     {error, Reason}
             end;
         {error, Reason} ->

@@ -8,15 +8,15 @@ cfg_schema() ->
     [#container{name = "interface",
                 desc = "Interface configuration",
                 config = true,
-                children = fun() -> interface_schema() end},
+                children = fun interface_schema/0},
      #container{name = "server",
                 desc = "Server configuration",
                 config = true,
-                children = fun() -> server_list_schema() end},
+                children = fun server_list_schema/0},
      #container{name = "client",
                 desc = "Client configuration",
                 config = true,
-                children = fun() -> client_list_schema() end}].
+                children = fun client_list_schema/0}].
 
 interface_schema() ->
     [#leaf{name = "speed",
@@ -29,7 +29,7 @@ server_list_schema() ->
            desc = "Server list",
            key_names = ["name"],
            data_callback = mgmtd,
-           children = fun() -> server_schema() end}].
+           children = fun server_schema/0}].
 
 server_schema() ->
     [#leaf{name = "name",
@@ -48,7 +48,7 @@ client_list_schema() ->
     [#list{name = "clients",
            desc = "Client list",
            key_names = ["host", "port"],
-           children = fun() -> client_schema() end}].
+           children = fun client_schema/0}].
 
 client_schema() ->
     [#leaf{name = "name",

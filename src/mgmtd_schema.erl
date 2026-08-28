@@ -14,7 +14,7 @@
 -export([lookup/1, lookup/2, get_default/1, get_default/2]).
 -export([lookup_path/1]).
 -export([children/1, children/2, children/3]).
--export([cast_value/2]).
+-export([cast_value/2, cast_list_key_values/1]).
 -export([ets_pat/1, ets_tail/1]).
 
 -include("../include/mgmtd.hrl").
@@ -236,11 +236,58 @@ cast_value(Path, Value) ->
                                           throw(Err)
                                   end
                           end, Value);
+            #{node_type := list, key_values := KVs} when KVs =/= [] ->
+                {ok, undefined};
             _ ->
                 {error, "Invalid path"}
         end
     catch error:Reason:_Trace ->
             {error, Reason}
+    end.
+
+%% Cast list-key leaf values according to each key leaf's schema type.
+%% `key_values` stay as the original path tokens so lookups keep working
+%% with the identity the caller used. Typed values go in `key_internal_values`.
+-spec cast_list_key_values(map_path()) -> {ok, map_path()} | {error, term()}.
+cast_list_key_values(Path) ->
+    cast_list_key_values(Path, []).
+
+cast_list_key_values([], Acc) ->
+    {ok, lists:reverse(Acc)};
+cast_list_key_values([#{node_type := list, key_names := Names,
+                        key_values := Vals, path := ListPath} = Node | Rest], Acc) ->
+    case Vals of
+        [] ->
+            cast_list_key_values(Rest, [Node | Acc]);
+        _ ->
+            case cast_key_leaf_values(ListPath, Names, Vals) of
+                {ok, Internal} ->
+                    cast_list_key_values(Rest, [Node#{key_internal_values => Internal} | Acc]);
+                {error, _} = Err ->
+                    Err
+            end
+    end;
+cast_list_key_values([Node | Rest], Acc) ->
+    cast_list_key_values(Rest, [Node | Acc]).
+
+cast_key_leaf_values(_ListPath, Names, Vals) when length(Names) =/= length(Vals) ->
+    {error, "Incorrect number of list keys"};
+cast_key_leaf_values(ListPath, Names, Vals) ->
+    cast_key_leaf_pairs(ListPath, lists:zip(Names, Vals), []).
+
+cast_key_leaf_pairs(_ListPath, [], Acc) ->
+    {ok, lists:reverse(Acc)};
+cast_key_leaf_pairs(ListPath, [{Name, Val} | Rest], Acc) ->
+    case lookup(ListPath ++ [Name]) of
+        #{node_type := leaf, type := Type} ->
+            case cast(Type, Val) of
+                {ok, Internal} ->
+                    cast_key_leaf_pairs(ListPath, Rest, [Internal | Acc]);
+                {error, _} = Err ->
+                    Err
+            end;
+        _ ->
+            {error, "Missing list key schema"}
     end.
 
 

@@ -44,6 +44,7 @@
                       default => any(),
                       key_names => [string()],
                       key_values => [term()],
+                      key_internal_values => [term()],
                       min_elements => integer(),
                       max_elements => unlimited | integer(),
                       pattern => string(),

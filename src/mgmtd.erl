@@ -227,6 +227,11 @@ pp_path(SchemaPath) ->
 path_to_operations(SchemaPath) ->
     path_to_operations(SchemaPath, [], []).
 
+%% Keys-only set: path ended on a keyed list with no leaf. Create the
+%% list identity; remaining leaves can be filled in later in the txn.
+path_to_operations([], [#{node_type := list, key_values := KVs} | _] = Path, [])
+  when KVs =/= [] ->
+    [{lists:reverse(Path), undefined}];
 path_to_operations([], _, Acc) ->
     lists:reverse(Acc);
 path_to_operations([#{node_type := container} = Container| Ps], Path, Acc) ->

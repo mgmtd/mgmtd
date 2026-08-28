@@ -158,6 +158,8 @@ insert_path_items(Db, Is, Value) ->
     insert_path_items(Db, Is, Value, []).
 
 -spec insert_path_items(permanent | {ets, ets:table()}, map_path(), term(), item_path()) -> ok.
+insert_path_items(_Db, [], _Value, _Path) ->
+    ok;
 insert_path_items(Db, [I | Is], Value, Path) ->
     case I of
         #{role := schema, node_type := container, name := Name} ->
@@ -194,8 +196,13 @@ insert_path_items(Db, [I | Is], Value, Path) ->
     end.
 
 -spec insert_list_keys(permanent | {ets, ets:table()}, item_path(), map_node()) -> ok.
-insert_list_keys(Db, Path, #{role := schema, key_names := KeyNames,
-                             key_values := KeyValues}) ->
+insert_list_keys(Db, Path, #{role := schema, key_names := KeyNames} = I) ->
+    %% key_values are the path identity (CLI tokens). Prefer schema-cast
+    %% key_internal_values so key leaves match their declared types.
+    KeyValues = case I of
+                    #{key_internal_values := Internal} -> Internal;
+                    #{key_values := Vals} -> Vals
+                end,
     NVPairs = lists:zip(KeyNames, KeyValues),
     lists:foreach(fun({Name, Value}) ->
                           Cfg = #cfg{name = Name,
@@ -211,6 +218,8 @@ check_conflict(Db, Is, Value) ->
     ?DBG("Check Conflict ~p~n",[Is]),
     check_conflict(Db, Is, Value, []).
 
+check_conflict(_Db, [], _Value, _Path) ->
+    ok;
 check_conflict(Db, [I|Is], Value, Path) ->
     case I of
         #{role := schema, node_type := container, name := Name} ->
