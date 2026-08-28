@@ -10,7 +10,7 @@
 
 -include("mgmtd_schema.hrl").
 
--export([init/2, remove_db/1]).
+-export([init/2, remove_db/2]).
 
 -export([copy_to_ets/0]).
 
@@ -50,11 +50,12 @@ init_db(Path, Nodes) ->
     ok = create_table(Nodes),
     ok = mnesia:wait_for_tables([cfg], 30000).
 
-remove_db(Opts) ->
-    Dir = proplists:get_value(db_path, Opts, "database"),
+remove_db(DbLocation, Opts) ->
     Nodes = proplists:get_value(nodes, Opts, [node()]),
-    ok = application:stop(mnesia),
-    mnesia:delete_schema(Nodes).
+    _ = application:stop(mnesia),
+    _ = mnesia:delete_schema(Nodes),
+    _ = file:del_dir_r(DbLocation),
+    ok.
 
 transaction(Fun) ->
     case mnesia:transaction(Fun) of

@@ -10,6 +10,7 @@
 
 -export([load_json_schema_file/1, load_json_schema_file/2, load_function_schema/2]).
 -export([remove_schema/0, remove_schema/1]).
+-export([register_schema/1, unregister_schema/1, registered_schemas/0]).
 -export([lookup/1, lookup/2, get_default/1, get_default/2]).
 -export([lookup_path/1]).
 -export([children/1, children/2, children/3]).
@@ -23,7 +24,7 @@
 %% and Yang - a superset of the capabilities of both
 %% with the same concepts in each dealt with by the same code
 %%
-%% Schema will be stored in an ets table for each namespace
+%% Schema is stored in the mgmtd_commands ets table, keyed by {Path, Namespace}
 %%
 %% Mappings between JSON schema and Yang node types
 %%
@@ -69,7 +70,41 @@ remove_schema() ->
     remove_schema(?DEFAULT_NS).
 
 remove_schema(Ns) ->
-    ets:delete(Ns).
+    unregister_schema(Ns),
+    ets:match_delete(mgmtd_commands, #schema{path = {'_', Ns}, _ = '_'}),
+    ok.
+
+register_schema(Name) ->
+    case ets:lookup(mgmtd_meta, loaded_schemas) of
+        [] ->
+            true = ets:insert(mgmtd_meta, {loaded_schemas, [Name]}),
+            ok;
+        [{loaded_schemas, Current}] ->
+            case lists:member(Name, Current) of
+                true ->
+                    ok;
+                false ->
+                    true = ets:insert(mgmtd_meta, {loaded_schemas, [Name | Current]}),
+                    ok
+            end
+    end.
+
+unregister_schema(Name) ->
+    case ets:lookup(mgmtd_meta, loaded_schemas) of
+        [] ->
+            ok;
+        [{loaded_schemas, Current}] ->
+                    true = ets:insert(mgmtd_meta, {loaded_schemas, lists:delete(Name, Current)}),
+                    ok
+    end.
+
+registered_schemas() ->
+    case ets:lookup(mgmtd_meta, loaded_schemas) of
+        [] ->
+            [];
+        [{_, Current}] ->
+            Current
+    end.
 
 -spec lookup(Path :: item_path()) -> map() | false.
 lookup(Path) ->
@@ -77,8 +112,8 @@ lookup(Path) ->
 
 -spec lookup(NameSpace :: ns(), Path :: item_path()) -> map() | false.
 lookup(Ns, Path) ->
-    SchemaPath = lists:filter(fun(P) -> not is_tuple(P) end, Path),
-    case ets:lookup(Ns, SchemaPath) of
+    SchemaPath = item_path_to_schema_path(Path),
+    case ets:lookup(mgmtd_commands, {SchemaPath, Ns}) of
         [#schema{} = Res] ->
             schema_to_map(Res, show);
         [] ->
@@ -104,16 +139,22 @@ children(Path) ->
 children(Path, CmdType) ->
     children(?DEFAULT_NS, Path, CmdType).
 
+-spec children(ns(), item_path(), cmd_type()) -> list().
 children(Ns, Path, delete) ->
-    SchemaPath = lists:filter(fun(P) -> not is_tuple(P) end, Path),
-    Recs = ets:match_object(Ns, #schema{path = SchemaPath ++ ['_'], has_list = true, _ = '_'}),
+    SchemaPath = item_path_to_schema_path(Path),
+    Recs = ets:match_object(mgmtd_commands, #schema{path = {SchemaPath ++ ['_'], Ns}, has_list = true, _ = '_'}),
     ?DBG("Found children in schema db at path ~p~n~p~n", [SchemaPath, Recs]),
     lists:map(fun(R) -> schema_to_map(R, delete) end, Recs);
 children(Ns, Path, CmdType) ->
-    SchemaPath = lists:filter(fun(P) -> not is_tuple(P) end, Path),
+    SchemaPath = item_path_to_schema_path(Path),
     ?DBG("Finding children in schema db at path ~p~n", [SchemaPath]),
-    Recs = ets:match_object(Ns, #schema{path = SchemaPath ++ ['_'], _ = '_'}),
+    Recs = ets:match_object(mgmtd_commands, #schema{path = {SchemaPath ++ ['_'], Ns}, _ = '_'}),
     lists:map(fun(R) -> schema_to_map(R, CmdType) end, Recs).
+
+-spec item_path_to_schema_path(item_path()) -> schema_path().
+item_path_to_schema_path(Path) ->
+    Fun = fun(P) -> not is_tuple(P) end,
+    lists:filter(Fun, Path).
 
 %% @doc Given a path of the form ["server", "servers", {"S1"}, "port"]
 %% return a list of schema items for the same path with any data after
@@ -143,7 +184,7 @@ lookup_path([P | Ps], PathSoFar, Acc) ->
 lookup_path([], _, Acc) ->
     {ok, lists:reverse(Acc)}.
 
-schema_to_map(#schema{path = Path} = S, CmdType) ->
+schema_to_map(#schema{path = {Path, _Ns}} = S, CmdType) ->
     #{role => schema,
       path => Path,
       node_type => S#schema.node_type,

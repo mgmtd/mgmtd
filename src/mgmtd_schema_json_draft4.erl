@@ -12,17 +12,13 @@ load_file(File) ->
 load_file(File, Opts) ->
     {ok, Bin} = file:read_file(File),
     Schema = jsx:decode(Bin, [return_maps]),
-    load_json_schema(Schema, Opts).
+    ok = load_json_schema(Schema, Opts).
 
 load_json_schema(#{<<"$schema">> := <<"http://json-schema.org/draft-04/schema#">>} = Schema,
                  Opts) ->
     NameSpace = maps:get(namespace, Opts, ?DEFAULT_NS),
-    case ets:info(NameSpace, id) of
-        undefined ->
-            ets:new(NameSpace, [named_table, {keypos, #schema.path}]);
-        _ -> ok
-    end,
-    load_json_schema(Schema, [], NameSpace, Opts).
+    ok = load_json_schema(Schema, [], NameSpace, Opts),
+    mgmtd_schema:register_schema(NameSpace).
 
 load_json_schema(#{<<"properties">> := Props}, Path, Ns, Opts) ->
     load_json_properties(Props, Path, Ns, Opts).
@@ -38,15 +34,15 @@ load_json_property(#{<<"type">> := <<"object">>} = Object,
                    Path,
                    Ns,
                    #{config := Config} = Opts) ->
-    %% A container, just store in the ets table Ns
+    %% A container
     Container =
-        #schema{path = lists:reverse(Path),
+        #schema{path = {lists:reverse(Path), Ns},
                 node_type = container,
                 name = Key,
-                desc = maps:get(<<"description">>, Object, <<"">>),
+                desc = maps:get(<<"description">>, Object, ""),
                 config = Config},
     %% io:format(user, "O - ~p~n", [lists:reverse(Path)]),
-    true = ets:insert_new(Ns, Container),
+    true = ets:insert_new(mgmtd_commands, Container),
     load_json_properties(maps:get(<<"properties">>, Object, #{}), Path, Ns, Opts);
 load_json_property(#{<<"type">> := <<"array">>} = Object,
                    Key,
@@ -62,11 +58,11 @@ load_json_property(#{<<"type">> := <<"array">>} = Object,
             Default = json_default(Type, Item),
 
             LeafList =
-                #schema{path = lists:reverse(Path),
+                #schema{path = {lists:reverse(Path), Ns},
                         node_type = leaf_list,
                         name = Key,
                         type = json_item_type(Item),
-                        desc = maps:get(<<"description">>, Item, <<"">>),
+                        desc = maps:get(<<"description">>, Item, ""),
                         default = Default,
                         min_elements = maps:get(<<"minItems">>, Item, undefined),
                         max_elements = maps:get(<<"maxItems">>, Item, undefined),
@@ -74,8 +70,7 @@ load_json_property(#{<<"type">> := <<"array">>} = Object,
                         mandatory = true,
                         config = Config
                        },
-            %% io:format(user, "LL - ~p~n", [lists:reverse(Path)]),
-            true = ets:insert_new(Ns, LeafList);
+            true = ets:insert_new(mgmtd_commands, LeafList);
         false ->
             %% It's a full list of potentially any subtree
             %% Ideally we need to know which items make up the list key
@@ -90,8 +85,8 @@ load_json_property(#{<<"type">> := <<"array">>} = Object,
                         %% properties of this array
                         lists:map(fun(LK) -> binary_to_list(LK) end, ListKeys);
                     _ when Config ->
-                        IndexLeaf = generated_index_leaf(Path, Config),
-                        true = ets:insert_new(Ns, IndexLeaf),
+                        IndexLeaf = generated_index_leaf(Path, Ns, Config),
+                        true = ets:insert_new(mgmtd_commands, IndexLeaf),
                         ["index"];
                     _ ->
                         %% Operational data doesn't require list index in Yang
@@ -99,26 +94,25 @@ load_json_property(#{<<"type">> := <<"array">>} = Object,
                 end,
 
             List =
-                #schema{path = lists:reverse(Path),
+                #schema{path = {lists:reverse(Path), Ns},
                         node_type = list,
                         name = Key,
-                        desc = maps:get(<<"description">>, Object, <<"">>),
+                        desc = maps:get(<<"description">>, Object, ""),
                         key_names = Keys,
                         min_elements = maps:get(<<"minItems">>, Object, 0),
                         max_elements = maps:get(<<"maxItems">>, Object, undefined),
                         mandatory = false,
                         data_callback = maps:get(callback, Opts, mgmtd),
                         config = Config},
-            true = ets:insert_new(Ns, List),
+            true = ets:insert_new(mgmtd_commands, List),
             Items = maps:get(<<"items">>, Object),
-            load_json_properties(maps:get(<<"properties">>, Items), Path, Ns, Opts),
-            ok
+            load_json_properties(maps:get(<<"properties">>, Items), Path, Ns, Opts)
     end;
 load_json_property(#{} = Item, Key, Path, Ns, #{config := Config}) ->
     Type = json_item_type(Item),
     Default = json_default(Type, Item),
     Leaf =
-        #schema{path = lists:reverse(Path),
+        #schema{path = {lists:reverse(Path), Ns},
                 node_type = leaf,
                 name = Key,
                 type = json_item_type(Item),
@@ -129,12 +123,12 @@ load_json_property(#{} = Item, Key, Path, Ns, #{config := Config}) ->
                 mandatory = true,
                 config = Config},
                                                 %io:format(user, "L - ~p~n", [lists:reverse(Path)]),
-    true = ets:insert_new(Ns, Leaf).
+    true = ets:insert_new(mgmtd_commands, Leaf).
 
 %% When no index is provided by the schema insert an integer based
 %% one with name index
-generated_index_leaf(Path, Config) ->
-    #schema{path = lists:reverse(["index" | Path]),
+generated_index_leaf(Path, Ns, Config) ->
+    #schema{path = {lists:reverse(["index" | Path]), Ns},
             node_type = leaf,
             name = "index",
             type = uint64,

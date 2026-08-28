@@ -248,3 +248,12 @@ So maybe:
 With a lot of subscribed processes this could be a bit heavy, but
 seems safest. Run with this option for now.
 
+Next up
+---
+
+ - get enum values working for all schema types
+ - get the rest of the yang datatypes working
+ - add yang schema support
+ - add namespace support
+ - add sys.config style database where namespace maps to application name
+ - add pipe commands

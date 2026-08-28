@@ -20,7 +20,7 @@
 -export([lookup/1, lookup/2, list_keys/1, list_keys/2, list_keys/3]).
 
 %%--------------------------------------------------------------------
-%% @doc Wrapper functions around the operations towards the chosen storage
+%% Wrapper functions around the operations towards the chosen storage
 %% engine
 %%--------------------------------------------------------------------
 
@@ -34,30 +34,35 @@ init(DbLocation, Opts) ->
     BackendMod = backend_mod(Backend),
     BackendMod:init(DbLocation, Opts),
     ets:insert(mgmtd_meta, {backend, BackendMod}),
-    ets:insert(mgmtd_meta, {db_location, DbLocation}).
+    to_ok(ets:insert(mgmtd_meta, {db_location, DbLocation})).
 
-remove_db(DbLocation, Backend) ->
+remove_db(DbLocation, Opts) ->
+    Backend = proplists:get_value(backend, Opts, json),
     BackendMod = backend_mod(Backend),
-    BackendMod:remove_db(DbLocation),
-    ets:delete(mgmtd_meta, db_location),
-    ets:delete(mgmtd_meta, backend).
+    ok = BackendMod:remove_db(DbLocation, Opts),
+    try ets:delete(mgmtd_meta, db_location) catch error:badarg -> true end,
+    try ets:delete(mgmtd_meta, backend) catch error:badarg -> true end,
+    ok.
 
 transaction(Fun) when is_function(Fun) ->
     BackendMod = backend(),
     BackendMod:transaction(Fun).
 
+-spec read(permanent | {ets, ets:tid()}, item_path()) -> list().
 read(permanent, Key) ->
     BackendMod = backend(),
     BackendMod:read(Key);
 read({ets, Ets}, Path) ->
     ets:lookup(Ets, Path).
 
+-spec write(permanent | {ets, ets:tid()}, #cfg{}) -> ok.
 write(permanent, #cfg{} = Cfg) ->
     BackendMod = backend(),
     BackendMod:write(Cfg);
 write({ets, Ets}, #cfg{} = Cfg) ->
     to_ok(ets:insert(Ets, Cfg)).
 
+-spec delete(permanent | {ets, ets:tid()}, item_path()) -> ok.
 delete(permanent, Path) ->
     BackendMod = backend(),
     BackendMod:delete(Path);
@@ -67,6 +72,7 @@ delete({ets, Ets}, Path) ->
 lookup(Path) ->
     lookup(permanent, Path).
 
+-spec lookup(permanent | {ets, ets:tid()}, item_path()) -> list().
 lookup(permanent, Path) ->
     BackendMod = backend(),
     BackendMod:lookup(Path);
@@ -147,11 +153,11 @@ to_ok(Else) -> Else.
 %% 3. Hm
 %%
 %% Insert a single entry in the database.
--spec insert_path_items(ets:tid(), [#schema{}], term()) -> ok.
+-spec insert_path_items(permanent | {ets, ets:tid()}, map_path(), term()) -> ok.
 insert_path_items(Db, Is, Value) ->
     insert_path_items(Db, Is, Value, []).
 
--spec insert_path_items(ets:tid(), [#{role := schema}], term(), list()) -> ok.
+-spec insert_path_items(permanent | {ets, ets:tid()}, map_path(), term(), list()) -> ok.
 insert_path_items(Db, [I | Is], Value, Path) ->
     case I of
         #{role := schema, node_type := container, name := Name} ->
@@ -187,6 +193,7 @@ insert_path_items(Db, [I | Is], Value, Path) ->
             write(Db, Cfg)
     end.
 
+-spec insert_list_keys(permanent | {ets, ets:tid()}, item_path(), map_node()) -> ok.
 insert_list_keys(Db, Path, #{role := schema, key_names := KeyNames,
                              key_values := KeyValues}) ->
     NVPairs = lists:zip(KeyNames, KeyValues),
@@ -257,7 +264,7 @@ check_conflict(Db, [I|Is], Value, Path) ->
 %% Delete a single list entry along with all nodes leading up to it that are
 %% not still used by another list item or child
 %%
--spec delete_path_items(ets:tid(), [#{role := schema}]) -> ok.
+-spec delete_path_items(permanent | {ets, ets:tid()}, map_path()) -> ok.
 delete_path_items(Db, Path) ->
     %% Steps:
     %% 1. delete all children of the list item - its leaves
@@ -266,6 +273,7 @@ delete_path_items(Db, Path) ->
     %% 4. delete all parent nodes that no longer have any children
     delete_path_items_all(Db, lists:reverse(Path)).
 
+-spec delete_path_items_all(permanent | {ets, ets:tid()}, map_path()) -> ok.
 delete_path_items_all(_Db, []) ->
     ok;
 delete_path_items_all(Db, [I|Is]) ->
@@ -283,7 +291,7 @@ delete_path_items_all(Db, [I|Is]) ->
                     ok
             end,
             delete_path_items_all(Db, Is);
-        #{role := schema, node_type := container, path := Path, name := Name} ->
+        #{role := schema, node_type := container, path := Path} ->
             Pattern = #cfg{path = Path ++ '_', _ = '_'},
             case match(Db, Pattern) of
                 [] ->
@@ -332,13 +340,14 @@ schema_to_cfg(#{role := schema,
          value = Value
         }.
 
-schema_list_key_to_cfg(#{role := schema, key_names := KNs} = C, Path, Key) ->
+schema_list_key_to_cfg(#{role := schema, key_names := KNs}, Path, Key) ->
     #cfg{node_type = list_key,
          name = Key,
          path = Path,
          value = KNs
         }.
 
+-spec schema_path_to_key(schema_path()) -> item_path().
 schema_path_to_key(Path) ->
     lists:foldl(fun(#{role := schema, node_type := list, key_values := Keys, name := Name}, Acc) when length(Keys) > 0 ->
                         Acc ++ [Name, list_to_tuple(Keys)];
@@ -365,7 +374,7 @@ cfg_list_to_tree([], Z) ->
     %% Finally extract a simple cfg tree from the zntree, skipping root
     zntree_to_cfg_tree(mgmtd_zntrees:children(Z)).
 
-                                                % Insert an item in the zntree. Z points to the children of the root node
+    %% Insert an item in the zntree. Z points to the children of the root node
 zntree_insert_item(#cfg{path = Path} = Cfg, Z) ->
     Z1 = zntree_node_at_path(Path, Z),
     Z2 = mgmtd_zntrees:insert(Cfg, Z1),
@@ -387,7 +396,7 @@ zntree_search(P, Z) ->
         #cfg{name = P} ->
             Z;
         #cfg{} ->
-            zntree_search(P, mgmtd_zntrees:right(P, Z))
+            zntree_search(P, mgmtd_zntrees:right(Z))
     end.
 
 zntree_root(Z) ->

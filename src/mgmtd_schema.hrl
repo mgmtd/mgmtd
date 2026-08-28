@@ -10,36 +10,61 @@
 -endif.
 
 -type ns() :: atom().
--type path_node() :: atom() | tuple().
+-type path_node() :: string() | {string()} | {string(), string()} | '_'.
 -type item_path() :: [path_node()].
--type schema_path() :: [atom()].
--type node_type() :: container | leaf | list | leaf_list.
-
--define(is_leaf(NodeType), NodeType == leaf orelse NodeType == leaf_list).
--define(DEFAULT_NS, mgmtd_schema_default_ns).
+-type schema_path() :: [string() | '_'].
+-type node_type() :: container | leaf | list | leaf_list | list_key.
+-type cmd_type() :: show | set | delete.
 
 %% Record stored in schema ets tables. One table for each namespace
 -record(schema,
-        {path :: schema_path(),     % Full path to item in tree
+        {path :: {schema_path(), ns()},     % Full path to item in tree
+         prefix = "" :: string(),
          node_type :: node_type(),  % container | leaf | list | leaf_list
          name :: binary(),
          desc :: string(),
-         type :: mgmtd:data_type(),
+         type :: mgmtd:data_type() | undefined,
          default,
-         key_names = [] :: [atom()], % {NodeName1, NodeName2, Nodename3} for lists
+         key_names = [] :: [string()], % {NodeName1, NodeName2, Nodename3} for lists
          data_callback :: atom(),
-         min_elements,
-         max_elements,
+         min_elements :: undefined | integer(),
+         max_elements :: undefined | integer(),
          pattern :: undefined | string(),
          mandatory = false :: boolean(),
          has_list = false :: boolean(),
          config = true :: boolean()}).
 
+-type map_node() :: #{role := schema,
+                      path := schema_path(),
+                      node_type := node_type(),
+                      name := string(),
+                      desc => string(),
+                      type => any(),
+                      default => any(),
+                      key_names => [string()],
+                      key_values => [string()],
+                      min_elements => integer(),
+                      max_elements => integer(),
+                      pattern => string(),
+                      mandatory => boolean(),
+                      config => boolean(),
+                      data_callback => atom(),
+                      cmd_type => cmd_type(),
+                      has_list => boolean(),
+                      children => function() }.
+
+-define(is_leaf(NodeType), NodeType == leaf orelse NodeType == leaf_list).
+-define(DEFAULT_NS, default_ns).
+
+-type full_schema_path() :: [#schema{}].
+-type map_path() :: [map_node()].
+-export_type([full_schema_path/0, map_path/0, item_path/0]).
+
 %% Record we store in the configuration database after validation against the schema.
 -record(cfg,
         {
-         path,
-         name,
-         node_type = container,
-         value
+         path :: item_path(),
+         name :: string(),
+         node_type = container :: node_type(),
+         value :: any()
         }).

@@ -10,6 +10,8 @@
 -export([start_link/0]).
 -export([init/1]).
 
+-include("mgmtd_schema.hrl").
+
 -define(SERVER, ?MODULE).
 
 start_link() ->
@@ -44,4 +46,5 @@ init([]) ->
 
 %% internal functions
 init_tabs() ->
-    ets:new(mgmtd_meta, [public, named_table]).
+    ets:new(mgmtd_meta, [public, named_table]),
+    ets:new(mgmtd_commands, [public, named_table, {keypos, #schema.path}]).

@@ -151,11 +151,10 @@ fmt_value(Float) when is_float(Float) -> float_to_list(Float);
 fmt_value(Str) when is_list(Str) -> Str;
 fmt_value(Bin) when is_binary(Bin) -> Bin.
 
-fmt_path_component(A) when is_atom(A) -> atom_to_list(A);
 fmt_path_component(T) when is_tuple(T) ->
-
     L = [fmt_value(V) || V <- tuple_to_list(T)],
-    ["{", lists:join($,, L), "}"].
+    ["{", lists:join($,, L), "}"];
+fmt_path_component(A) -> A.
 
 max_file_num([]) -> 0;
 max_file_num(DbFiles) ->
@@ -169,12 +168,12 @@ max_file_num(DbFiles) ->
 
 cfgs() ->
     [
-     #cfg{path = [a], name = a},
-     #cfg{path = [a, b], name = b},
-     #cfg{path = [a, b, c], name = c, node_type = leaf, value = 100},
-     #cfg{path = [a, b, d], name = d, node_type = leaf, value = 100.1},
-     #cfg{path = [a, e], name = e, node_type = leaf, value = "E Value"},
-     #cfg{path = [a, f, {"List","Ke y"}, key], name = e, node_type = leaf, value = "F Value"}
+     #cfg{path = ["a"], name = "a"},
+     #cfg{path = ["a", "b"], name = "b"},
+     #cfg{path = ["a", "b", "c"], name = "c", node_type = leaf, value = 100},
+     #cfg{path = ["a", "b", "d"], name = "d", node_type = leaf, value = 100.1},
+     #cfg{path = ["a", "e"], name = "e", node_type = leaf, value = "E Value"},
+     #cfg{path = ["a", "f", {"List","Ke y"}, "key"], name = "e", node_type = leaf, value = "F Value"}
     ].
 
 export_format_test_() ->

@@ -17,6 +17,8 @@
 -type thread() :: [znode()].
 -type zntree() :: {thread(), znode()}.
 
+-export_type([zntree/0]).
+
 %% creates a tree with an empty thread and Val as the root.
 -spec root(term()) -> zntree().
 root(Val) -> {[], {[], [{Val, {[], []}}]}}.

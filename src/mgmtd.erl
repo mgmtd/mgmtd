@@ -10,6 +10,8 @@
 -export([subscribe/2,
          load_json_schema/1, load_json_schema/2,
          load_function_schema/1, load_function_schema/2,
+         remove_schema/0, remove_schema/1,
+         registered_schemas/0,
          load_config_db/1]).
 %% Transaction API
 -export([txn_new/0, txn_exit/1, txn_set/2, txn_delete/2, txn_show/2, txn_commit/1]).
@@ -53,6 +55,12 @@ load_json_schema(File) ->
 load_json_schema(File, Opts) when is_map(Opts) ->
     mgmtd_schema:load_json_schema_file(File, Opts).
 
+remove_schema() ->
+    mgmtd_schema:remove_schema().
+
+remove_schema(Ns) ->
+    mgmtd_schema:remove_schema(Ns).
+
 %% @doc Load a schema defined in Erlang code.
 %%
 load_function_schema(Fun) ->
@@ -60,6 +68,9 @@ load_function_schema(Fun) ->
 
 load_function_schema(Fun, Opts) ->
     mgmtd_schema:load_function_schema(Fun, Opts).
+
+registered_schemas() ->
+    mgmtd_schema:registered_schemas().
 
 %% @doc Load the configuration database.
 %% Call this function after loading the schema(s) early
@@ -153,14 +164,16 @@ schema_children(Ns, Path, CmdType) ->
 %% will be the list of list keys, for a container item or full path to
 %% a list item this will be a list of child nodes.
 
+-spec lookup(item_path()) -> {ok, any()} | {error, unknown_schema_path}.
 lookup(Path) ->
     lookup(?DEFAULT_NS, Path).
 
+-spec lookup(ns(), item_path()) -> {ok, any()} | {error, unknown_schema_path}.
 lookup(Ns, Path) ->
     SchemaPath = lists:filter(fun(El) -> not is_tuple(El) end, Path),
     case mgmtd_schema:lookup(Ns, SchemaPath) of
         false ->
-            {error, unkown_schema_path};
+            {error, unknown_schema_path};
         #{node_type := list, key_names := Keys} ->
             case lists:last(Path) of
                 ListKey when is_tuple(ListKey) ->
@@ -198,14 +211,16 @@ schema_list_to_path([#{role := schema} = Last], Acc) ->
 schema_list_to_path([#{role := schema, name := Name} | Ss], Acc) ->
     schema_list_to_path(Ss, [Name | Acc]).
 
+-spec pp_path(map_path()) -> mgmtd_schema:item_path().
 pp_path(SchemaPath) ->
     lists:reverse(
       lists:foldl(
-        fun(#{node_type := list, key_values := KeyValues, name := Name}, Acc) ->
+        fun(#{node_type := list, key_values := KeyValues, name := Name}, Acc) when is_tuple(KeyValues) ->
                 [list_to_tuple(KeyValues), Name | Acc];
            (#{name := Name}, Acc) ->
                 [Name | Acc]
         end, [], SchemaPath)).
+
 
 %% A single command might set multiple parameter values
 %% Generate separate set operations for each value

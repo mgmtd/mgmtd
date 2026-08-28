@@ -7,8 +7,8 @@
 
 load(Fun, Opts) when is_function(Fun) ->
     NameSpace = maps:get(namespace, Opts, ?DEFAULT_NS),
-    ets:new(NameSpace, [named_table, {keypos, #schema.path}]),
-    load(Fun, [], NameSpace, true).
+    ok = load(Fun, [], NameSpace, true),
+    mgmtd_schema:register_schema(NameSpace).
 
 load(Fun, Path, Ns, IsConfig) ->
     lists:foreach(fun(Child) ->
@@ -17,20 +17,21 @@ load(Fun, Path, Ns, IsConfig) ->
 
 load_node(#container{name = Name, desc = Desc, config = Config0} = Node, Path, Ns, IsConfig) ->
     Config = inherited_config(Config0, IsConfig),
+    FullPath = lists:reverse([Name | Path]),
     Container =
-        #schema{path = lists:reverse([Name | Path]),
+        #schema{path = {FullPath, Ns},
                 node_type = container,
                 name = Name,
                 desc = Desc,
                 config = Config},
-    %% io:format(user, "O - ~p~n", [lists:reverse(Path)]),
-    true = ets:insert_new(Ns, Container),
+    true = ets:insert_new(mgmtd_commands, Container),
     load(Node#container.children, [Name | Path], Ns, Config);
 load_node(#list{name = Name, desc = Desc, key_names = KeyNames, config = Config0} = Node, Path, Ns, IsConfig) ->
     Config = inherited_config(Config0, IsConfig),
     assert_key_names(KeyNames, Node#list.children),
+    FullPath = lists:reverse([Name | Path]),
     LeafList =
-        #schema{path = lists:reverse([Name | Path]),
+        #schema{path = {FullPath, Ns},
                 node_type = list,
                 name = Name,
                 key_names = KeyNames,
@@ -41,13 +42,14 @@ load_node(#list{name = Name, desc = Desc, key_names = KeyNames, config = Config0
                 has_list = true,
                 config = Config},
                                                 % io:format(user, "L - ~p~n", [lists:reverse(Path)]),
-    true = ets:insert_new(Ns, LeafList),
+    true = ets:insert_new(mgmtd_commands, LeafList),
     ok = mark_has_list_descendent(Ns, Path),
     load(Node#list.children, [Name | Path], Ns, Config);
 load_node(#leaf{name = Name, desc = Desc, type = Type, default = Default, config = Config0} = Node, Path, Ns, IsConfig) ->
     Config = inherited_config(Config0, IsConfig),
+    FullPath = lists:reverse([Name | Path]),
     Leaf =
-        #schema{path = lists:reverse([Name | Path]),
+        #schema{path = {FullPath, Ns},
                 node_type = leaf,
                 name = Name,
                 type = Type,
@@ -56,11 +58,12 @@ load_node(#leaf{name = Name, desc = Desc, type = Type, default = Default, config
                 mandatory = Node#leaf.mandatory,
                 config = Config},
                                                 %io:format(user, "L - ~p~n", [lists:reverse(Path)]),
-    true = ets:insert_new(Ns, Leaf);
+    true = ets:insert_new(mgmtd_commands, Leaf);
 load_node(#leaf_list{name = Name, desc = Desc, type = Type, config = Config0} = Node, Path, Ns, IsConfig) ->
     Config = inherited_config(Config0, IsConfig),
+    FullPath = lists:reverse([Name | Path]),
     LeafList =
-        #schema{path = lists:reverse([Name | Path]),
+        #schema{path = {FullPath, Ns},
                 node_type = leaf_list,
                 name = Name,
                 type = Type,
@@ -68,8 +71,7 @@ load_node(#leaf_list{name = Name, desc = Desc, type = Type, config = Config0} = 
                 min_elements = Node#leaf_list.min_elements,
                 max_elements = Node#leaf_list.max_elements,
                 config = Config},
-                                                %io:format(user, "L - ~p~n", [lists:reverse(Path)]),
-    true = ets:insert_new(Ns, LeafList).
+    true = ets:insert_new(mgmtd_commands, LeafList).
 
 assert_key_names(KeyNames, ChildrenFun) ->
     Children = ChildrenFun(),
@@ -93,8 +95,8 @@ mark_has_list_descendent(_Ns, []) ->
     ok;
 mark_has_list_descendent(Ns, Path) ->
     SchPath = lists:reverse(Path),
-    [Node] = ets:lookup(Ns, SchPath),
-    ets:insert(Ns, Node#schema{has_list = true}),
+    [Node] = ets:lookup(mgmtd_commands, {SchPath, Ns}),
+    ets:insert(mgmtd_commands, Node#schema{has_list = true}),
     mark_has_list_descendent(Ns, tl(Path)).
 
 

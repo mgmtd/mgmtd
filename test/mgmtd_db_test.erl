@@ -12,47 +12,41 @@
 
 -include_lib("eunit/include/eunit.hrl").
 
-setup_schema() ->
-    mgmtd_sup:start_link(),
-    %% ok = mgmtd_cfg_db:remove_db("test_db", mnesia),
+-define(DB_DIR, "test_db").
 
-    mgmtd:load_function_schema(fun() -> mgmtd_test_schema:cfg_schema() end),
-    mgmtd_cfg_db:init("test_db", [{backend, mnesia}]),
+setup() ->
+    start_mgmtd(),
+    ok = mgmtd:remove_schema(),
+    ok = mgmtd_cfg_db:remove_db(?DB_DIR, [{backend, mnesia}]),
+    ok = mgmtd:load_function_schema(fun mgmtd_test_schema:cfg_schema/0),
+    ok = mgmtd_cfg_db:init(?DB_DIR, [{backend, mnesia}]),
     ok.
 
-init_cfg() ->
+teardown(_) ->
+    ok = mgmtd:remove_schema(),
+    ok = mgmtd_cfg_db:remove_db(?DB_DIR, [{backend, mnesia}]),
     ok.
 
-destroy_schema() ->
-    mgmtd_schema:remove_schema(),
-    mgmtd_cfg_db:remove_db("test_db", mnesia),
-    ok.
+start_mgmtd() ->
+    case mgmtd_sup:start_link() of
+        {ok, _} -> ok;
+        {error, {already_started, _}} -> ok
+    end.
 
-subscription_test_() ->
-    {setup,
-     fun() ->
-             setup_schema(),
-             init_cfg()
-     end,
-     fun(_Pid) ->
-            destroy_schema()
-     end,
-     fun(_Pid) ->
-            %% test list item create
-            SetPath = ["server", "servers", {"newlistitem"}, "port", "81"],
-            {ok, SchemaPath} = mgmtd_schema:lookup_path(SetPath),
-            %% ?debugFmt("Set Path ~p", [SchemaPath]),
-            Txn = mgmtd:txn_new(),
-            {ok, Txn2} = mgmtd:txn_set(Txn, SchemaPath),
-            {ok, Txn3} = mgmtd:txn_commit(Txn2),
-            ?'_assertEqual'(5, mnesia:table_info(cfg, size)),
+list_item_test_() ->
+    {setup, fun setup/0, fun teardown/1,
+     [fun create_and_delete_list_item/0]}.
 
-            %% test list item delete
-            DelPath = ["server", "servers", {"newlistitem"}],
-            {ok, DelSchemaPath} = mgmtd_schema:lookup_path(DelPath),
-            %% ?debugFmt("DEL Path ~p", [DelSchemaPath]),
-            {ok, Txn4} = mgmtd:txn_delete(Txn3, DelSchemaPath),
-            _ = mgmtd:txn_commit(Txn4),
-            ?'_assertEqual'(0, mnesia:table_info(cfg, size))
-     end}.
+create_and_delete_list_item() ->
+    SetPath = ["server", "servers", {"newlistitem"}, "port", "81"],
+    {ok, SchemaPath} = mgmtd_schema:lookup_path(SetPath),
+    Txn = mgmtd:txn_new(),
+    {ok, Txn2} = mgmtd:txn_set(Txn, SchemaPath),
+    {ok, Txn3} = mgmtd:txn_commit(Txn2),
+    ?assertEqual(5, mnesia:table_info(cfg, size)),
 
+    DelPath = ["server", "servers", {"newlistitem"}],
+    {ok, DelSchemaPath} = mgmtd_schema:lookup_path(DelPath),
+    {ok, Txn4} = mgmtd:txn_delete(Txn3, DelSchemaPath),
+    {ok, _} = mgmtd:txn_commit(Txn4),
+    ?assertEqual(0, mnesia:table_info(cfg, size)).

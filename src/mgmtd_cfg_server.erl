@@ -84,7 +84,7 @@ commit(Txn) ->
 %% Initializes the server
 %% @end
 %%--------------------------------------------------------------------
--spec init(Args :: term()) -> {ok, State :: term()} |
+-spec init(Args :: term()) -> {ok, State :: #state{}} |
           {ok, State :: term(), Timeout :: timeout()} |
           {ok, State :: term(), hibernate} |
           {stop, Reason :: term()} |
@@ -99,16 +99,16 @@ init([]) ->
 %% Handling call messages
 %% @end
 %%--------------------------------------------------------------------
--spec handle_call(Request :: term(), From :: {pid(), term()}, State :: term()) ->
-          {reply, Reply :: term(), NewState :: term()} |
-          {reply, Reply :: term(), NewState :: term(), Timeout :: timeout()} |
-          {reply, Reply :: term(), NewState :: term(), hibernate} |
-          {noreply, NewState :: term()} |
-          {noreply, NewState :: term(), Timeout :: timeout()} |
-          {noreply, NewState :: term(), hibernate} |
-          {stop, Reason :: term(), Reply :: term(), NewState :: term()} |
-          {stop, Reason :: term(), NewState :: term()}.
-handle_call({subscribe, Path, Pid}, _From, State) ->
+-spec handle_call(Request :: term(), From :: {pid(), term()}, State :: #state{}) ->
+          {reply, Reply :: term(), NewState :: #state{}} |
+          {reply, Reply :: term(), NewState :: #state{}, Timeout :: timeout()} |
+          {reply, Reply :: term(), NewState :: #state{}, hibernate} |
+          {noreply, NewState :: #state{}} |
+          {noreply, NewState :: #state{}, Timeout :: timeout()} |
+          {noreply, NewState :: #state{}, hibernate} |
+          {stop, Reason :: term(), Reply :: term(), NewState :: #state{}} |
+          {stop, Reason :: term(), NewState :: #state{}}.
+handle_call({subscribe, Path, Pid}, _From, State) when is_pid(Pid) ->
     case initial_subscription_message(Path) of
         {error, _Reason} = Err ->
             {reply, Err, State};
@@ -164,11 +164,11 @@ handle_call(_Request, _From, State) ->
 %% Handling cast messages
 %% @end
 %%--------------------------------------------------------------------
--spec handle_cast(Request :: term(), State :: term()) ->
-          {noreply, NewState :: term()} |
-          {noreply, NewState :: term(), Timeout :: timeout()} |
-          {noreply, NewState :: term(), hibernate} |
-          {stop, Reason :: term(), NewState :: term()}.
+-spec handle_cast(Request :: term(), State :: #state{}) ->
+          {noreply, NewState :: #state{}} |
+          {noreply, NewState :: #state{}, Timeout :: timeout()} |
+          {noreply, NewState :: #state{}, hibernate} |
+          {stop, Reason :: term(), NewState :: #state{}}.
 handle_cast(_Request, State) ->
     {noreply, State}.
 
@@ -178,11 +178,11 @@ handle_cast(_Request, State) ->
 %% Handling all non call/cast messages
 %% @end
 %%--------------------------------------------------------------------
--spec handle_info(Info :: timeout() | term(), State :: term()) ->
-          {noreply, NewState :: term()} |
-          {noreply, NewState :: term(), Timeout :: timeout()} |
-          {noreply, NewState :: term(), hibernate} |
-          {stop, Reason :: normal | term(), NewState :: term()}.
+-spec handle_info(Info :: timeout() | term(), State :: #state{}) ->
+          {noreply, NewState :: #state{}} |
+          {noreply, NewState :: #state{}, Timeout :: timeout()} |
+          {noreply, NewState :: #state{}, hibernate} |
+          {stop, Reason :: normal | term(), NewState :: #state{}}.
 handle_info({'DOWN', _, _, Pid, _}, State) ->
     %% Process down, remove all the subscriptions of this process
     case ets:lookup(State#state.sub_pids, Pid) of
@@ -214,7 +214,7 @@ handle_info(_Info, State) ->
 %% @end
 %%--------------------------------------------------------------------
 -spec terminate(Reason :: normal | shutdown | {shutdown, term()} | term(),
-                State :: term()) -> any().
+                State :: #state{}) -> any().
 terminate(_Reason, _State) ->
     ok.
 
@@ -225,7 +225,7 @@ terminate(_Reason, _State) ->
 %% @end
 %%--------------------------------------------------------------------
 -spec code_change(OldVsn :: term() | {down, term()},
-                  State :: term(),
+                  State :: #state{},
                   Extra :: term()) -> {ok, NewState :: term()} |
           {error, Reason :: term()}.
 code_change(_OldVsn, State, _Extra) ->
