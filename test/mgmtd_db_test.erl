@@ -50,3 +50,22 @@ create_and_delete_list_item() ->
     {ok, Txn4} = mgmtd:txn_delete(Txn3, DelSchemaPath),
     {ok, _} = mgmtd:txn_commit(Txn4),
     ?assertEqual(0, mnesia:table_info(cfg, size)).
+
+enum_leaf_test_() ->
+    {setup, fun setup/0, fun teardown/1,
+     [fun set_enum_with_description/0,
+      fun reject_unknown_enum/0]}.
+
+set_enum_with_description() ->
+    SetPath = ["interface", "speed", "1GbE"],
+    {ok, SchemaPath} = mgmtd_schema:lookup_path(SetPath),
+    Txn = mgmtd:txn_new(),
+    {ok, Txn2} = mgmtd:txn_set(Txn, SchemaPath),
+    {ok, _} = mgmtd:txn_commit(Txn2),
+    ?assertEqual({ok, "1GbE"}, mgmtd:lookup(["interface", "speed"])).
+
+reject_unknown_enum() ->
+    SetPath = ["interface", "speed", "67"],
+    {ok, SchemaPath} = mgmtd_schema:lookup_path(SetPath),
+    Txn = mgmtd:txn_new(),
+    ?assertEqual({error, "Unknown enum value"}, mgmtd:txn_set(Txn, SchemaPath)).

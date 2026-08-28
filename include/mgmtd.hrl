@@ -1,4 +1,15 @@
 
+%% YANG enumeration member. Canonical stored value is the name string.
+%% {Name, Description} is the compact function-schema form; the map
+%% form matches YANG enum (name / description / optional integer value).
+-type enum_member() :: string()
+                     | {string(), string()}
+                     | #{name := string(),
+                         desc => string(),
+                         value => integer()}.
+
+%% `{enum, Members}' and `{enumeration, Members}' are type constructors,
+%% not `{Module, Type}' callbacks. `{Mod, Type}' is only for user modules.
 -type data_type() :: uint8
                    | uint16
                    | uint32
@@ -11,12 +22,13 @@
                    | integer
                    | string
                    | boolean
-                   | {enum, [string() | {string(), string()}]}
+                   | {enum, [enum_member()]}
+                   | {enumeration, [enum_member()]}
                    | 'inet:ip-address'
                    | 'inet:port-number'
-                   | {Mod :: atom(), Type :: atom()}.
+                   | {Mod :: atom(), Type :: term()}.
 
--export_type([data_type/0]).
+-export_type([data_type/0, enum_member/0]).
 
 -record(container,
     {

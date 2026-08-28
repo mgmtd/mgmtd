@@ -145,6 +145,10 @@ is_leaf_list_array(Object) ->
             true
     end.
 
+json_item_type(#{<<"enum">> := Vals}) when is_list(Vals) ->
+    %% JSON Schema enum is a constraint; model it as a YANG enumeration
+    %% so CLI completion and set-path validation share the same type form.
+    {enum, [json_enum_member(V) || V <- Vals]};
 json_item_type(#{<<"type">> := <<"integer">>}) ->
     int32;
 json_item_type(#{<<"type">> := Type}) ->
@@ -153,6 +157,13 @@ json_item_type(#{<<"pattern">> := _Pattern}) ->
     %% No type specified, but 'pattern' is only defined for strings
     %% JSON schema sure is permissive..
     string.
+
+json_enum_member(Bin) when is_binary(Bin) -> binary_to_list(Bin);
+json_enum_member(Int) when is_integer(Int) -> integer_to_list(Int);
+json_enum_member(true) -> "true";
+json_enum_member(false) -> "false";
+json_enum_member(null) -> "null";
+json_enum_member(Str) when is_list(Str) -> Str.
 
 json_default(_Type, #{<<"default">> := Default}) ->
     Default;

@@ -7,6 +7,8 @@ parse_ae_config_schema_test() ->
     mgmtd_sup:start_link(),
     ok = mgmtd:load_json_schema("test/aeternity_config_schema.json"),
     [_] = mgmtd:registered_schemas(),
+    #{type := Type} = mgmtd_schema:lookup(["logging", "level"]),
+    ?assertEqual({enum, ["debug", "info", "warning", "error", "none"]}, Type),
     ok = mgmtd:remove_schema(),
     [] = mgmtd:registered_schemas().
 

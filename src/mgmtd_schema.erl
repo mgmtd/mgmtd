@@ -285,20 +285,52 @@ cast({int8, Range}, Token) ->
 cast(int8, Token) -> cast_integer(Token, int8_range());
 
 cast(string, Token) -> {ok, Token};
+cast(boolean, B) when is_boolean(B) -> {ok, B};
 cast(boolean, "true") -> {ok, true};
 cast(boolean, "false") -> {ok, false};
 cast({enum, AllowedVals}, Token) -> cast_enum(Token, AllowedVals);
+cast({enumeration, AllowedVals}, Token) -> cast_enum(Token, AllowedVals);
 cast('inet:port-number', Token) -> cast_integer(Token, uint16_range());
+cast('inet:ip-address', Addr) when tuple_size(Addr) =:= 4; tuple_size(Addr) =:= 8 ->
+    {ok, Addr};
 cast('inet:ip-address', Token) -> cast_ip_address(Token);
+cast({union, _Types}, _Token) -> {error, "union types are not supported yet"};
+cast({bits, _Bits}, _Token) -> {error, "bits types are not supported yet"};
+cast({leafref, _Path}, _Token) -> {error, "leafref types are not supported yet"};
+cast({identityref, _Base}, _Token) -> {error, "identityref types are not supported yet"};
 cast({Mod, Type}, Token) when is_atom(Mod) ->
-    case Mod:cast_value(Type, Token) of
-        {ok, Value} -> {ok, Value};
-        {error, _Err} = Err ->
-            Err
+    case is_yang_constructor(Mod) of
+        true ->
+            {error, {unknown_type, {Mod, Type}}};
+        false ->
+            case Mod:cast_value(Type, Token) of
+                {ok, Value} -> {ok, Value};
+                {error, _Err} = Err ->
+                    Err
+            end
     end;
 cast(Type, _Token) ->
     io:format("MGMTD unsupported leaf type: ~p\n", [Type]),
     {error, {unknown_type, Type}}.
+
+%% YANG `{Tag, Payload}' constructors. Must not be dispatched as Mod:cast_value/2.
+is_yang_constructor(enum) -> true;
+is_yang_constructor(enumeration) -> true;
+is_yang_constructor(union) -> true;
+is_yang_constructor(bits) -> true;
+is_yang_constructor(leafref) -> true;
+is_yang_constructor(identityref) -> true;
+is_yang_constructor(uint8) -> true;
+is_yang_constructor(uint16) -> true;
+is_yang_constructor(uint32) -> true;
+is_yang_constructor(uint64) -> true;
+is_yang_constructor(int8) -> true;
+is_yang_constructor(int16) -> true;
+is_yang_constructor(int32) -> true;
+is_yang_constructor(int64) -> true;
+is_yang_constructor(integer) -> true;
+is_yang_constructor(decimal64) -> true;
+is_yang_constructor(_) -> false.
 
 merge_ranges([{min, Min} | Rs], UserRange) ->
     case lists:keyfind(min, 1, UserRange) of
@@ -346,15 +378,17 @@ cast_integer_in_range(Int, []) ->
 cast_integer_in_range(_Int, _) ->
     {error, "Value out of range"}.
 
-cast_enum(Token, AllowedVals) ->
-    lists:foldl(fun(Enum, Result) ->
-                        cast_enum_val(Enum, Token, Result)
-                end, {error, "Unkknown enum value"}, AllowedVals).
+cast_enum(Token, [Member | Rest]) ->
+    case enum_member_name(Member) of
+        Token -> {ok, Token};
+        _ -> cast_enum(Token, Rest)
+    end;
+cast_enum(_Token, []) ->
+    {error, "Unknown enum value"}.
 
-cast_enum_val(_Enum, _Token, {ok, Res}) -> {ok, Res};
-cast_enum_val({Enum, _Desc}, Enum, _) -> {ok, Enum};
-cast_enum_val(Enum, Enum, _) -> {ok, Enum};
-cast_enum_val(_,_, Res) -> Res.
+enum_member_name(#{name := Name}) -> Name;
+enum_member_name({Name, _Desc}) -> Name;
+enum_member_name(Name) when is_list(Name) -> Name.
 
 cast_ip_address(Token) ->
     case inet:parse_address(Token) of
