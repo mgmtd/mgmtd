@@ -12,10 +12,11 @@
          replace/2, insert/2, delete/1,
          left/1, right/1, children/1, parent/1, rparent/1]).
 
--type zlist(A) :: {Left::list(A), Right::list(A)}.
--type znode()  :: zlist({term(), zlist(_)}). % znode is a zlist of nodes
--type thread() :: [znode()].
--type zntree() :: {thread(), znode()}.
+-type zlist(A) :: {Left :: [A], Right :: [A]}.
+-type znode()  :: {term(), zlist(znode())}.
+-type thread_entry() :: {Left :: [znode()], [term() | znode()]}.
+-type thread() :: [thread_entry()].
+-type zntree() :: {thread(), zlist(znode())}.
 
 -export_type([zntree/0]).
 
@@ -70,7 +71,7 @@ children({Thread, {L, [{Val, Children}|R]}}) ->
 %% If you prefer the children to be 'rewinded', use rparent/1.
 -spec parent(zntree()) -> zntree().
 parent({[{L, [Val|R]}|Thread], Children}) ->
-    {Thread, {L, [{Val, Children}|R]}}.
+    {Thread, {L, [{Val, Children} | as_znodes(R)]}}.
 
 %% Moves up to the direct parent level, much like parent/1. However,
 %% it rewinds the current level's zlist before doing so. This allows
@@ -78,4 +79,8 @@ parent({[{L, [Val|R]}|Thread], Children}) ->
 %% all the time.
 -spec rparent(zntree()) -> zntree().
 rparent({[{ParentL, [Val|ParentR]}|Thread], {L, R}}) ->
-    {Thread, {ParentL, [{Val, {[], lists:reverse(L)++R}}|ParentR]}}.
+    {Thread, {ParentL, [{Val, {[], lists:reverse(L) ++ R}} | as_znodes(ParentR)]}}.
+
+%% Thread entries store [Val | RightSiblings]; eqwalizer cannot refine the tail back to [znode()].
+-spec as_znodes(eqwalizer:dynamic()) -> [znode()].
+as_znodes(X) -> X.

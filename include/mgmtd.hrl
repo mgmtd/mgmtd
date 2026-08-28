@@ -10,8 +10,11 @@
                    | decimal64
                    | integer
                    | string
-                   | enum
-                   | {Mod :: atom(), Func :: atom()}.
+                   | boolean
+                   | {enum, [string() | {string(), string()}]}
+                   | 'inet:ip-address'
+                   | 'inet:port-number'
+                   | {Mod :: atom(), Type :: atom()}.
 
 -export_type([data_type/0]).
 
@@ -19,7 +22,7 @@
     {
         name :: string(),
         desc = "" :: string(),
-        config = undefined :: undefined | boolean(),
+        config = false :: boolean(),
         children = fun() -> [] end :: fun(() -> list()),
         opts = [] :: list()
     }).
@@ -28,12 +31,12 @@
     {
         name :: string(),
         desc = "" :: string(),
-        key_names = [] :: [atom()],
+        key_names = [] :: [string()],
         min_elements = 0 :: integer(),
-        max_elements :: integer(),
+        max_elements = unlimited :: unlimited | integer(),
         data_callback = mgmtd :: atom(),
         unique = true :: boolean(),
-        config = undefined :: undefined | boolean(),
+        config = false :: boolean(),
         children = fun() -> [] end :: fun(() -> list()),
         opts = [] :: list()
     }).
@@ -45,7 +48,7 @@
         desc :: string(),
         default,
         mandatory = false :: boolean(),
-        config = undefined :: undefined | boolean(),
+        config = false :: boolean(),
         opts = [] :: list()
     }).
 
@@ -56,9 +59,9 @@
         desc :: string(),
         default,
         mandatory = false :: boolean(),
-        config = undefined :: undefined | boolean(),
+        config = false :: boolean(),
         min_elements = 0 :: integer(),
-        max_elements :: integer(),
+        max_elements = unlimited :: unlimited | integer(),
         undefined :: undefined | boolean(),
         opts = [] :: list()
     }).

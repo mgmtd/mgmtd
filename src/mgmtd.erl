@@ -46,12 +46,12 @@ start() ->
 %% get_next(Path, ListKey) -> {ok, ListKey} | {error, Reason}
 %%
 %% Options:
-%% config => true | false (default true)
+%% config => true | false (default false)
 %% callback => Module::atom()
 %% namespace => NameSpace::string()
 
 load_json_schema(File) ->
-    mgmtd_schema:load_json_schema_file(File, #{config => true}).
+    mgmtd_schema:load_json_schema_file(File, #{config => false}).
 load_json_schema(File, Opts) when is_map(Opts) ->
     mgmtd_schema:load_json_schema_file(File, Opts).
 
@@ -215,7 +215,7 @@ schema_list_to_path([#{role := schema, name := Name} | Ss], Acc) ->
 pp_path(SchemaPath) ->
     lists:reverse(
       lists:foldl(
-        fun(#{node_type := list, key_values := KeyValues, name := Name}, Acc) when is_tuple(KeyValues) ->
+        fun(#{node_type := list, key_values := KeyValues, name := Name}, Acc) when is_list(KeyValues) ->
                 [list_to_tuple(KeyValues), Name | Acc];
            (#{name := Name}, Acc) ->
                 [Name | Acc]

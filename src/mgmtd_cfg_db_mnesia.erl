@@ -93,12 +93,12 @@ lookup(Path) ->
     mnesia:dirty_read(cfg, Path).
 
 select(Path, Pattern) ->
-    mnesia:dirty_select(cfg, [{#cfg{path = Path ++ [Pattern], _ = '_'}, [], ['$1']}]).
+    mnesia:dirty_select(cfg, [{#cfg{path = mgmtd_schema:ets_pat(Path ++ [Pattern]), _ = mgmtd_schema:ets_pat('_')}, [], ['$1']}]).
 
--spec copy_to_ets() -> ets:tid().
+-spec copy_to_ets() -> ets:table().
 copy_to_ets() ->
     Ets = ets:new(cfg_txn, [public, ordered_set, {keypos, #cfg.path}]),
-    Fun = fun() -> mnesia:match_object(#cfg{_ = '_'}) end,
+    Fun = fun() -> mnesia:match_object(#cfg{_ = mgmtd_schema:ets_pat('_')}) end,
     {atomic, Rows} = mnesia:transaction(Fun),
     lists:foreach(fun(Row) -> ets:insert(Ets, Row) end, Rows),
     %% io:format(user, "Copied ~p~n",[ets:tab2list(Ets)]),

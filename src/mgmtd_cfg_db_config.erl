@@ -69,7 +69,7 @@ next(Tab, Key) ->
 %% @doc Store the contents of an ets table of #cfg{} records
 %% representing a configuration tree to file
 %%--------------------------------------------------------------------
--spec ets_to_file(ets:tid()) -> ok.
+-spec ets_to_file(ets:table()) -> ok.
 ets_to_file(Ets) ->
     Directory = "store",
     ets_to_file(Ets, Directory).
@@ -89,12 +89,12 @@ ets_to_file(Ets, Directory) ->
 %% @doc Load the contents of the latest ets table of #cfg{} records
 %% from a previously saved .config format file.
 %%--------------------------------------------------------------------
--spec file_to_ets(ets:tid()) -> ok.
+-spec file_to_ets(ets:table()) -> ok.
 file_to_ets(Ets) ->
     Directory = "store",
     file_to_ets(Ets, Directory).
 
--spec file_to_ets(ets:tid(), file:filename()) -> ok.
+-spec file_to_ets(ets:table(), file:filename()) -> ok.
 file_to_ets(Ets, Directory) ->
     {ok, Files} = file:list_dir(Directory),
     DbFiles = lists:filter(fun(F) -> lists:prefix("db.",F) end, Files),

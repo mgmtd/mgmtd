@@ -15,6 +15,7 @@
 -export([lookup_path/1]).
 -export([children/1, children/2, children/3]).
 -export([cast_value/2]).
+-export([ets_pat/1, ets_tail/1]).
 
 -include("../include/mgmtd.hrl").
 -include("mgmtd_schema.hrl").
@@ -71,7 +72,7 @@ remove_schema() ->
 
 remove_schema(Ns) ->
     unregister_schema(Ns),
-    ets:match_delete(mgmtd_commands, #schema{path = {'_', Ns}, _ = '_'}),
+    ets:match_delete(mgmtd_commands, #schema{path = ets_pat({'_', Ns}), _ = ets_pat('_')}),
     ok.
 
 register_schema(Name) ->
@@ -142,19 +143,30 @@ children(Path, CmdType) ->
 -spec children(ns(), item_path(), cmd_type()) -> list().
 children(Ns, Path, delete) ->
     SchemaPath = item_path_to_schema_path(Path),
-    Recs = ets:match_object(mgmtd_commands, #schema{path = {SchemaPath ++ ['_'], Ns}, has_list = true, _ = '_'}),
+    Recs = ets:match_object(mgmtd_commands, #schema{path = {SchemaPath ++ ['_'], Ns}, has_list = true, _ = ets_pat('_')}),
     ?DBG("Found children in schema db at path ~p~n~p~n", [SchemaPath, Recs]),
     lists:map(fun(R) -> schema_to_map(R, delete) end, Recs);
 children(Ns, Path, CmdType) ->
     SchemaPath = item_path_to_schema_path(Path),
     ?DBG("Finding children in schema db at path ~p~n", [SchemaPath]),
-    Recs = ets:match_object(mgmtd_commands, #schema{path = {SchemaPath ++ ['_'], Ns}, _ = '_'}),
+    Recs = ets:match_object(mgmtd_commands, #schema{path = {SchemaPath ++ ['_'], Ns}, _ = ets_pat('_')}),
     lists:map(fun(R) -> schema_to_map(R, CmdType) end, Recs).
 
 -spec item_path_to_schema_path(item_path()) -> schema_path().
-item_path_to_schema_path(Path) ->
-    Fun = fun(P) -> not is_tuple(P) end,
-    lists:filter(Fun, Path).
+item_path_to_schema_path([]) ->
+    [];
+item_path_to_schema_path([P | Ps]) when is_list(P); P =:= '_' ->
+    [P | item_path_to_schema_path(Ps)];
+item_path_to_schema_path([P | Ps]) when is_tuple(P) ->
+    item_path_to_schema_path(Ps).
+
+%% ETS match specs use '_' wildcards, which are not valid stored field values.
+-spec ets_pat(term()) -> eqwalizer:dynamic().
+ets_pat(X) -> X.
+
+%% Improper list Path ++ '_' used as an ETS path prefix match.
+-spec ets_tail(item_path()) -> eqwalizer:dynamic().
+ets_tail(Path) -> Path ++ ets_pat('_').
 
 %% @doc Given a path of the form ["server", "servers", {"S1"}, "port"]
 %% return a list of schema items for the same path with any data after

@@ -72,7 +72,7 @@ get_tree(#cfg_txn{ets_copy = Copy}, Path) ->
     ?DBG("Path = ~p~n",[Path]),
     Key = mgmtd_cfg_db:schema_path_to_key(Path),
     ?DBG("Key = ~p~n",[Key]),
-    Rows = ets:match_object(Copy, #cfg{path = Key ++ '_', _ = '_'}),
+    Rows = ets:match_object(Copy, #cfg{path = mgmtd_schema:ets_tail(Key), _ = mgmtd_schema:ets_pat('_')}),
     SubRows = drop_path_prefix(Key, Rows),
     Tree = mgmtd_cfg_db:cfg_list_to_tree(SubRows),
     %% ?DBG("Tree ~p~n",[Tree]),
@@ -120,7 +120,7 @@ delete(#cfg_txn{ets_copy = Copy, ops = Ops} = Txn, Path) ->
 list_keys(undefined, Path, Pattern) ->
     list_keys(#cfg_txn{ets_copy = cfg}, Path, Pattern);
 list_keys(#cfg_txn{ets_copy = Copy}, Path, Pattern) ->
-    ets:select(Copy, [{#cfg{path = Path ++ [Pattern], _ = '_'}, [], ['$1']}]).
+    ets:select(Copy, [{#cfg{path = mgmtd_schema:ets_pat(Path ++ [Pattern]), _ = mgmtd_schema:ets_pat('_')}, [], ['$1']}]).
 
 
 

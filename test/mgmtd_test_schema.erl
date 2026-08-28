@@ -7,12 +7,15 @@
 cfg_schema() ->
     [#container{name = "interface",
                 desc = "Interface configuration",
+                config = true,
                 children = fun() -> interface_schema() end},
      #container{name = "server",
                 desc = "Server configuration",
+                config = true,
                 children = fun() -> server_list_schema() end},
      #container{name = "client",
                 desc = "Client configuration",
+                config = true,
                 children = fun() -> client_list_schema() end}].
 
 interface_schema() ->

@@ -7,12 +7,12 @@
 
 
 load_file(File) ->
-    load_file(File, #{config => true}).
+    load_file(File, #{}).
 
 load_file(File, Opts) ->
     {ok, Bin} = file:read_file(File),
     Schema = json:decode(Bin),
-    ok = load_json_schema(Schema, Opts).
+    ok = load_json_schema(Schema, maps:merge(#{config => false}, Opts)).
 
 load_json_schema(#{<<"$schema">> := <<"http://json-schema.org/draft-04/schema#">>} = Schema,
                  Opts) ->
@@ -39,7 +39,7 @@ load_json_property(#{<<"type">> := <<"object">>} = Object,
         #schema{path = {lists:reverse(Path), Ns},
                 node_type = container,
                 name = Key,
-                desc = maps:get(<<"description">>, Object, ""),
+                desc = json_desc(Object),
                 config = Config},
     %% io:format(user, "O - ~p~n", [lists:reverse(Path)]),
     true = ets:insert_new(mgmtd_commands, Container),
@@ -62,10 +62,10 @@ load_json_property(#{<<"type">> := <<"array">>} = Object,
                         node_type = leaf_list,
                         name = Key,
                         type = json_item_type(Item),
-                        desc = maps:get(<<"description">>, Item, ""),
+                        desc = json_desc(Item),
                         default = Default,
-                        min_elements = maps:get(<<"minItems">>, Item, undefined),
-                        max_elements = maps:get(<<"maxItems">>, Item, undefined),
+                        min_elements = maps:get(<<"minItems">>, Object, 0),
+                        max_elements = maps:get(<<"maxItems">>, Object, unlimited),
                         data_callback = maps:get(callback, Opts, mgmtd),
                         mandatory = true,
                         config = Config
@@ -97,10 +97,10 @@ load_json_property(#{<<"type">> := <<"array">>} = Object,
                 #schema{path = {lists:reverse(Path), Ns},
                         node_type = list,
                         name = Key,
-                        desc = maps:get(<<"description">>, Object, ""),
+                        desc = json_desc(Object),
                         key_names = Keys,
                         min_elements = maps:get(<<"minItems">>, Object, 0),
-                        max_elements = maps:get(<<"maxItems">>, Object, undefined),
+                        max_elements = maps:get(<<"maxItems">>, Object, unlimited),
                         mandatory = false,
                         data_callback = maps:get(callback, Opts, mgmtd),
                         config = Config},
@@ -116,10 +116,8 @@ load_json_property(#{} = Item, Key, Path, Ns, #{config := Config}) ->
                 node_type = leaf,
                 name = Key,
                 type = json_item_type(Item),
-                desc = maps:get(<<"description">>, Item, <<"">>),
+                desc = json_desc(Item),
                 default = Default,
-                min_elements = maps:get(<<"minItems">>, Item, 0),
-                max_elements = maps:get(<<"maxItems">>, Item, undefined),
                 mandatory = true,
                 config = Config},
                                                 %io:format(user, "L - ~p~n", [lists:reverse(Path)]),
@@ -132,7 +130,7 @@ generated_index_leaf(Path, Ns, Config) ->
             node_type = leaf,
             name = "index",
             type = uint64,
-            desc = <<"List index">>,
+            desc = "List index",
             mandatory = true,
             config = Config}.
 
@@ -160,3 +158,9 @@ json_default(_Type, #{<<"default">> := Default}) ->
     Default;
 json_default(_Type, _) ->
     missing_default.
+
+json_desc(Map) ->
+    case maps:get(<<"description">>, Map, "") of
+        Bin when is_binary(Bin) -> binary_to_list(Bin);
+        Str -> Str
+    end.

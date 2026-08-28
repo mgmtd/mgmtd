@@ -48,21 +48,21 @@ transaction(Fun) when is_function(Fun) ->
     BackendMod = backend(),
     BackendMod:transaction(Fun).
 
--spec read(permanent | {ets, ets:tid()}, item_path()) -> list().
+-spec read(permanent | {ets, ets:table()}, item_path()) -> list().
 read(permanent, Key) ->
     BackendMod = backend(),
     BackendMod:read(Key);
 read({ets, Ets}, Path) ->
     ets:lookup(Ets, Path).
 
--spec write(permanent | {ets, ets:tid()}, #cfg{}) -> ok.
+-spec write(permanent | {ets, ets:table()}, #cfg{}) -> ok.
 write(permanent, #cfg{} = Cfg) ->
     BackendMod = backend(),
     BackendMod:write(Cfg);
 write({ets, Ets}, #cfg{} = Cfg) ->
     to_ok(ets:insert(Ets, Cfg)).
 
--spec delete(permanent | {ets, ets:tid()}, item_path()) -> ok.
+-spec delete(permanent | {ets, ets:table()}, item_path()) -> ok.
 delete(permanent, Path) ->
     BackendMod = backend(),
     BackendMod:delete(Path);
@@ -72,7 +72,7 @@ delete({ets, Ets}, Path) ->
 lookup(Path) ->
     lookup(permanent, Path).
 
--spec lookup(permanent | {ets, ets:tid()}, item_path()) -> list().
+-spec lookup(permanent | {ets, ets:table()}, item_path()) -> list().
 lookup(permanent, Path) ->
     BackendMod = backend(),
     BackendMod:lookup(Path);
@@ -107,7 +107,7 @@ list_keys(permanent, Path, Pattern) ->
     BackendMod = backend(),
     BackendMod:select(Path, Pattern);
 list_keys({ets, Ets}, Path, Pattern) ->
-    ets:select(Ets, [{#cfg{path = Path ++ [Pattern], _ = '_'}, [], ['$1']}]).
+    ets:select(Ets, [{#cfg{path = mgmtd_schema:ets_pat(Path ++ [Pattern]), _ = mgmtd_schema:ets_pat('_')}, [], ['$1']}]).
 
 copy_to_ets() ->
     BackendMod = backend(),
@@ -153,11 +153,11 @@ to_ok(Else) -> Else.
 %% 3. Hm
 %%
 %% Insert a single entry in the database.
--spec insert_path_items(permanent | {ets, ets:tid()}, map_path(), term()) -> ok.
+-spec insert_path_items(permanent | {ets, ets:table()}, map_path(), term()) -> ok.
 insert_path_items(Db, Is, Value) ->
     insert_path_items(Db, Is, Value, []).
 
--spec insert_path_items(permanent | {ets, ets:tid()}, map_path(), term(), list()) -> ok.
+-spec insert_path_items(permanent | {ets, ets:table()}, map_path(), term(), item_path()) -> ok.
 insert_path_items(Db, [I | Is], Value, Path) ->
     case I of
         #{role := schema, node_type := container, name := Name} ->
@@ -193,7 +193,7 @@ insert_path_items(Db, [I | Is], Value, Path) ->
             write(Db, Cfg)
     end.
 
--spec insert_list_keys(permanent | {ets, ets:tid()}, item_path(), map_node()) -> ok.
+-spec insert_list_keys(permanent | {ets, ets:table()}, item_path(), map_node()) -> ok.
 insert_list_keys(Db, Path, #{role := schema, key_names := KeyNames,
                              key_values := KeyValues}) ->
     NVPairs = lists:zip(KeyNames, KeyValues),
@@ -264,7 +264,7 @@ check_conflict(Db, [I|Is], Value, Path) ->
 %% Delete a single list entry along with all nodes leading up to it that are
 %% not still used by another list item or child
 %%
--spec delete_path_items(permanent | {ets, ets:tid()}, map_path()) -> ok.
+-spec delete_path_items(permanent | {ets, ets:table()}, map_path()) -> ok.
 delete_path_items(Db, Path) ->
     %% Steps:
     %% 1. delete all children of the list item - its leaves
@@ -273,17 +273,17 @@ delete_path_items(Db, Path) ->
     %% 4. delete all parent nodes that no longer have any children
     delete_path_items_all(Db, lists:reverse(Path)).
 
--spec delete_path_items_all(permanent | {ets, ets:tid()}, map_path()) -> ok.
+-spec delete_path_items_all(permanent | {ets, ets:table()}, map_path()) -> ok.
 delete_path_items_all(_Db, []) ->
     ok;
 delete_path_items_all(Db, [I|Is]) ->
     case I of
         #{role := schema, node_type := list, path := Path, key_values := KVs} ->
             ListItemPath = Path ++ [list_to_tuple(KVs)],
-            Pattern = #cfg{path = ListItemPath ++ '_', _ = '_'},
+            Pattern = #cfg{path = mgmtd_schema:ets_tail(ListItemPath), _ = mgmtd_schema:ets_pat('_')},
             ok = match_delete(Db, Pattern),
             %% See if we can also delete the list node, Check if there are any remaining list items
-            ListNodePattern = #cfg{path = Path ++ '_', node_type = list_key, _ = '_'},
+            ListNodePattern = #cfg{path = mgmtd_schema:ets_tail(Path), node_type = list_key, _ = mgmtd_schema:ets_pat('_')},
             case match(Db, ListNodePattern) of
                 [] ->
                     ok = delete(Db, Path);
@@ -292,7 +292,7 @@ delete_path_items_all(Db, [I|Is]) ->
             end,
             delete_path_items_all(Db, Is);
         #{role := schema, node_type := container, path := Path} ->
-            Pattern = #cfg{path = Path ++ '_', _ = '_'},
+            Pattern = #cfg{path = mgmtd_schema:ets_tail(Path), _ = mgmtd_schema:ets_pat('_')},
             case match(Db, Pattern) of
                 [] ->
                     ok;
@@ -347,7 +347,7 @@ schema_list_key_to_cfg(#{role := schema, key_names := KNs}, Path, Key) ->
          value = KNs
         }.
 
--spec schema_path_to_key(schema_path()) -> item_path().
+-spec schema_path_to_key(map_path()) -> item_path().
 schema_path_to_key(Path) ->
     lists:foldl(fun(#{role := schema, node_type := list, key_values := Keys, name := Name}, Acc) when length(Keys) > 0 ->
                         Acc ++ [Name, list_to_tuple(Keys)];

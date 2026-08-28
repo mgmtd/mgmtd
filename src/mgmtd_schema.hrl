@@ -10,7 +10,8 @@
 -endif.
 
 -type ns() :: atom().
--type path_node() :: string() | {string()} | {string(), string()} | '_'.
+-type list_key() :: tuple().
+-type path_node() :: string() | list_key() | '_'.
 -type item_path() :: [path_node()].
 -type schema_path() :: [string() | '_'].
 -type node_type() :: container | leaf | list | leaf_list | list_key.
@@ -21,18 +22,18 @@
         {path :: {schema_path(), ns()},     % Full path to item in tree
          prefix = "" :: string(),
          node_type :: node_type(),  % container | leaf | list | leaf_list
-         name :: binary(),
+         name :: string(),
          desc :: string(),
          type :: mgmtd:data_type() | undefined,
          default,
          key_names = [] :: [string()], % {NodeName1, NodeName2, Nodename3} for lists
          data_callback :: atom(),
-         min_elements :: undefined | integer(),
-         max_elements :: undefined | integer(),
+         min_elements = 0 :: integer(),
+         max_elements = unlimited :: unlimited | integer(),
          pattern :: undefined | string(),
          mandatory = false :: boolean(),
          has_list = false :: boolean(),
-         config = true :: boolean()}).
+         config = false :: boolean()}).
 
 -type map_node() :: #{role := schema,
                       path := schema_path(),
@@ -42,9 +43,9 @@
                       type => any(),
                       default => any(),
                       key_names => [string()],
-                      key_values => [string()],
+                      key_values => [term()],
                       min_elements => integer(),
-                      max_elements => integer(),
+                      max_elements => unlimited | integer(),
                       pattern => string(),
                       mandatory => boolean(),
                       config => boolean(),
@@ -64,7 +65,7 @@
 -record(cfg,
         {
          path :: item_path(),
-         name :: string(),
+         name :: string() | list_key(),
          node_type = container :: node_type(),
          value :: any()
         }).

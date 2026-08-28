@@ -14,30 +14,30 @@
 
 configs() ->
     [
-     #cfg{path = [a], name = a},
-     #cfg{path = [a, b], name = b},
-     #cfg{path = [a, b, c], name = c, node_type = leaf, value = c_val},
-     #cfg{path = [a, b, d], name = d, node_type = leaf, value = d_val},
-     #cfg{path = [a, e], name = e, node_type = leaf, value = e_val}
+     #cfg{path = ["a"], name = "a"},
+     #cfg{path = ["a", "b"], name = "b"},
+     #cfg{path = ["a", "b", "c"], name = "c", node_type = leaf, value = c_val},
+     #cfg{path = ["a", "b", "d"], name = "d", node_type = leaf, value = d_val},
+     #cfg{path = ["a", "e"], name = "e", node_type = leaf, value = e_val}
     ].
 
 expected_tree() ->
-    [#cfg{path = [a],
-          name = a,
+    [#cfg{path = ["a"],
+          name = "a",
           value =
-              [#cfg{path = [a,b],
-                    name = b,
+              [#cfg{path = ["a", "b"],
+                    name = "b",
                     value =
-                        [#cfg{path = [a,b,c],
-                              name = c,
+                        [#cfg{path = ["a", "b", "c"],
+                              name = "c",
                               node_type = leaf,
                               value = c_val},
-                         #cfg{path = [a,b,d],
-                              name = d,
+                         #cfg{path = ["a", "b", "d"],
+                              name = "d",
                               node_type = leaf,
                               value = d_val}]},
-               #cfg{path = [a,e],
-                    name = e,
+               #cfg{path = ["a", "e"],
+                    name = "e",
                     node_type = leaf,
                     value = e_val}]}].
 

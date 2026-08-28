@@ -7,7 +7,8 @@
 
 load(Fun, Opts) when is_function(Fun) ->
     NameSpace = maps:get(namespace, Opts, ?DEFAULT_NS),
-    ok = load(Fun, [], NameSpace, true),
+    IsConfig = maps:get(config, Opts, false),
+    ok = load(Fun, [], NameSpace, IsConfig),
     mgmtd_schema:register_schema(NameSpace).
 
 load(Fun, Path, Ns, IsConfig) ->
@@ -100,18 +101,8 @@ mark_has_list_descendent(Ns, Path) ->
     mark_has_list_descendent(Ns, tl(Path)).
 
 
-%% Use yang rules here (Section 7.19.1 of RFC 6020):
-%% If the top node does not specify a "config" statement, the default is
-%%   "true".
-%%
-%%   If a node has "config" set to "false", no node underneath it can have
-%%   "config" set to "true".
-inherited_config(undefined, Existing) ->
-    Existing;
-inherited_config(false, true) ->
-    io:format("Warning, ignored attempt to set config = true under config = false node\n"),
-    false;
-inherited_config(true, false) ->
-    false;
-inherited_config(true, _) ->
-    true.
+%% config is true only inside a config tree: a node with config = true
+%% starts a tree, and descendants inherit true even if they leave the
+%% record default (false).
+inherited_config(NodeConfig, ParentConfig) ->
+    ParentConfig orelse NodeConfig.
