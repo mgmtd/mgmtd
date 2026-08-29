@@ -16,7 +16,7 @@ setup() ->
     start_mgmtd(),
     ok = mgmtd:remove_schema(),
     ok = mgmtd_cfg_db:remove_db(?DB_DIR, [{backend, mnesia}]),
-    ok = mgmtd:load_function_schema(fun() -> mgmtd_test_schema:cfg_schema() end),
+    ok = mgmtd:load_function_schema(fun mgmtd_test_schema:cfg_schema/0),
     ok = mgmtd_cfg_db:init(?DB_DIR, [{backend, mnesia}]),
     ok.
 

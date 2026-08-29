@@ -1,9 +1,11 @@
--module(mgmtd_schema_json_draft4).
+-module(mgmtd_schema_json_draft7).
 
 -export([load_file/1, load_file/2]).
 
 -include("../include/mgmtd.hrl").
 -include("mgmtd_schema.hrl").
+
+-define(DRAFT7_SCHEMA, <<"http://json-schema.org/draft-07/schema#">>).
 
 
 load_file(File) ->
@@ -12,13 +14,16 @@ load_file(File) ->
 load_file(File, Opts) ->
     {ok, Bin} = file:read_file(File),
     Schema = json:decode(Bin),
-    ok = load_json_schema(Schema, maps:merge(#{config => false}, Opts)).
+    load_json_schema(Schema, maps:merge(#{config => false}, Opts)).
 
-load_json_schema(#{<<"$schema">> := <<"http://json-schema.org/draft-04/schema#">>} = Schema,
-                 Opts) ->
+load_json_schema(#{<<"$schema">> := ?DRAFT7_SCHEMA} = Schema, Opts) ->
     NameSpace = maps:get(namespace, Opts, ?DEFAULT_NS),
     ok = load_json_schema(Schema, [], NameSpace, Opts),
-    mgmtd_schema:register_schema(NameSpace).
+    mgmtd_schema:register_schema(NameSpace);
+load_json_schema(#{<<"$schema">> := Other}, _Opts) ->
+    {error, {unsupported_json_schema, Other}};
+load_json_schema(_Schema, _Opts) ->
+    {error, {unsupported_json_schema, missing_dollar_schema}}.
 
 load_json_schema(#{<<"properties">> := Props}, Path, Ns, Opts) ->
     load_json_properties(Props, Path, Ns, Opts).
@@ -145,18 +150,65 @@ is_leaf_list_array(Object) ->
             true
     end.
 
+json_item_type(#{<<"const">> := Val}) ->
+    %% Draft-06+ const is a single allowed value; model as a one-member enum.
+    {enum, [json_enum_member(Val)]};
 json_item_type(#{<<"enum">> := Vals}) when is_list(Vals) ->
     %% JSON Schema enum is a constraint; model it as a YANG enumeration
     %% so CLI completion and set-path validation share the same type form.
     {enum, [json_enum_member(V) || V <- Vals]};
-json_item_type(#{<<"type">> := <<"integer">>}) ->
-    int32;
+json_item_type(#{<<"type">> := <<"integer">>} = Item) ->
+    json_integer_type(Item);
 json_item_type(#{<<"type">> := Type}) ->
     binary_to_atom(Type);
 json_item_type(#{<<"pattern">> := _Pattern}) ->
     %% No type specified, but 'pattern' is only defined for strings
     %% JSON schema sure is permissive..
     string.
+
+%% Draft-07 exclusiveMinimum/exclusiveMaximum are numbers, not booleans.
+json_integer_type(Item) ->
+    Range = json_integer_range(Item),
+    case Range of
+        [] -> int32;
+        _ -> {int32, Range}
+    end.
+
+json_integer_range(Item) ->
+    Min = json_integer_bound(Item, <<"minimum">>, <<"exclusiveMinimum">>, min),
+    Max = json_integer_bound(Item, <<"maximum">>, <<"exclusiveMaximum">>, max),
+    Min ++ Max.
+
+json_integer_bound(Item, InclusiveKey, ExclusiveKey, Tag) ->
+    Inc = json_number(maps:get(InclusiveKey, Item, undefined)),
+    Exc = json_number(maps:get(ExclusiveKey, Item, undefined)),
+    IncBound = case Inc of
+                   undefined -> undefined;
+                   IncN -> inclusive_int_bound(Tag, IncN)
+               end,
+    ExcBound = case Exc of
+                   undefined -> undefined;
+                   ExcN -> exclusive_int_bound(Tag, ExcN)
+               end,
+    case {Tag, IncBound, ExcBound} of
+        {_, undefined, undefined} -> [];
+        {_, undefined, E} -> [{Tag, E}];
+        {_, I, undefined} -> [{Tag, I}];
+        {min, I, E} -> [{min, max(I, E)}];
+        {max, I, E} -> [{max, min(I, E)}]
+    end.
+
+json_number(N) when is_number(N) -> N;
+json_number(_) -> undefined.
+
+%% Inclusive min is ceil(N); inclusive max is floor(N).
+inclusive_int_bound(min, Bound) -> erlang:ceil(Bound);
+inclusive_int_bound(max, Bound) -> erlang:floor(Bound).
+
+%% Draft-07 exclusive bounds are numeric: integers must be strictly
+%% greater / less than the given number.
+exclusive_int_bound(min, Bound) -> erlang:floor(Bound) + 1;
+exclusive_int_bound(max, Bound) -> erlang:ceil(Bound) - 1.
 
 json_enum_member(Bin) when is_binary(Bin) -> binary_to_list(Bin);
 json_enum_member(Int) when is_integer(Int) -> integer_to_list(Int);

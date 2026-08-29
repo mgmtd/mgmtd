@@ -46,6 +46,8 @@
 %% | max-elements for lists and leaf-lists    | maxItems for arrays
 %% | length N or N..M for string types        | minLength and maxLength strings
 %% | range N or N..M or multiple for integers | minimum and maximum
+%% |                                           | exclusiveMinimum / exclusiveMaximum
+%% |                                           | (draft-07: numbers, not booleans)
 %%
 %% JSON schema union types - not allowed. Could maybe map to Yang Choice?
 %% For now, each leaf is only allowed to have a single type
@@ -57,12 +59,12 @@
 -spec load_json_schema_file(FilePath :: file:filename()) ->
           ok | {error, Reason :: term()}.
 load_json_schema_file(File) ->
-    mgmtd_schema_json_draft4:load_file(File).
+    mgmtd_schema_json_draft7:load_file(File).
 
 -spec load_json_schema_file(FilePath :: file:filename(), Opts :: map()) ->
           ok | {error, Reason :: term()}.
 load_json_schema_file(File, Opts) ->
-    mgmtd_schema_json_draft4:load_file(File, Opts).
+    mgmtd_schema_json_draft7:load_file(File, Opts).
 
 load_function_schema(Fun, Opts) ->
     mgmtd_schema_function:load(Fun, Opts).

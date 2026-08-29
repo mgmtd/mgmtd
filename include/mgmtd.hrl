@@ -10,6 +10,8 @@
 
 %% `{enum, Members}' and `{enumeration, Members}' are type constructors,
 %% not `{Module, Type}' callbacks. `{Mod, Type}' is only for user modules.
+%% `{integer-type, Range}' is a JSON Schema / YANG range restriction.
+-type int_range() :: [{min, integer()} | {max, integer()}].
 -type data_type() :: uint8
                    | uint16
                    | uint32
@@ -18,6 +20,14 @@
                    | int16
                    | int32
                    | int64
+                   | {uint8, int_range()}
+                   | {uint16, int_range()}
+                   | {uint32, int_range()}
+                   | {uint64, int_range()}
+                   | {int8, int_range()}
+                   | {int16, int_range()}
+                   | {int32, int_range()}
+                   | {int64, int_range()}
                    | decimal64
                    | integer
                    | string
