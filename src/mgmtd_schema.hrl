@@ -9,18 +9,29 @@
 -define(DBG(FORMAT, ARGS), ok).
 -endif.
 
--type ns() :: atom().
+%% Prefix is the operational identity (CLI token, sys.config app key,
+%% ETS key). Namespace is the YANG URI when one exists; for JSON and
+%% Erlang schemas it is the same atom as the prefix.
+-type prefix() :: atom().
+-type ns() :: prefix().
+-type namespace() :: prefix() | string().
 -type list_key() :: tuple().
 -type path_node() :: string() | list_key() | '_'.
 -type item_path() :: [path_node()].
 -type schema_path() :: [string() | '_'].
 -type node_type() :: container | leaf | list | leaf_list | list_key.
 -type cmd_type() :: show | set | delete.
+-type schema_source() :: json | function | yang | unknown.
 
-%% Record stored in schema ets tables. One table for each namespace
+-define(is_leaf(NodeType), NodeType == leaf orelse NodeType == leaf_list).
+-define(DEFAULT_NS, default).
+
+%% Record stored in the single mgmtd_commands ETS table, keyed by
+%% {Path, Prefix}. Named prefixes are loaded as a real root container;
+%% descendant paths start with the prefix name. Default prefix is silent.
 -record(schema,
-        {path :: {schema_path(), ns()},     % Full path to item in tree
-         prefix = "" :: string(),
+        {path :: {schema_path(), prefix()},     % Schema path + prefix
+         prefix = ?DEFAULT_NS :: prefix(),
          node_type :: node_type(),  % container | leaf | list | leaf_list
          name :: string(),
          desc :: string(),
@@ -37,6 +48,7 @@
 
 -type map_node() :: #{role := schema,
                       path := schema_path(),
+                      ns => prefix(),
                       node_type := node_type(),
                       name := string(),
                       desc => string(),
@@ -54,9 +66,6 @@
                       cmd_type => cmd_type(),
                       has_list => boolean(),
                       children => function() }.
-
--define(is_leaf(NodeType), NodeType == leaf orelse NodeType == leaf_list).
--define(DEFAULT_NS, default_ns).
 
 -type full_schema_path() :: [#schema{}].
 -type map_path() :: [map_node()].

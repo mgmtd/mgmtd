@@ -10,10 +10,13 @@
 
 -export([load_json_schema_file/1, load_json_schema_file/2, load_function_schema/2]).
 -export([remove_schema/0, remove_schema/1]).
--export([register_schema/1, unregister_schema/1, registered_schemas/0]).
+-export([prepare_load/3, register_schema/1, register_schema/3,
+         unregister_schema/1, registered_schemas/0]).
+-export([prefix_container/2, mark_has_list_descendent/2]).
 -export([lookup/1, lookup/2, get_default/1, get_default/2]).
 -export([lookup_path/1]).
 -export([children/1, children/2, children/3]).
+-export([split_item_path/1, cli_path/2]).
 -export([cast_value/2, cast_list_key_values/1]).
 -export([ets_pat/1, ets_tail/1]).
 
@@ -25,7 +28,10 @@
 %% and Yang - a superset of the capabilities of both
 %% with the same concepts in each dealt with by the same code
 %%
-%% Schema is stored in the mgmtd_commands ets table, keyed by {Path, Namespace}
+%% Schema is stored in the mgmtd_commands ets table, keyed by {Path, Prefix}.
+%% Named prefixes are loaded as a real #container{} whose name is the prefix,
+%% so descendant schema paths start with that name. Default prefix is silent.
+%% A YANG namespace URI, when present, lives in the loaded_schemas registry.
 %%
 %% Mappings between JSON schema and Yang node types
 %%
@@ -77,41 +83,69 @@ remove_schema(Ns) ->
     ets:match_delete(mgmtd_commands, #schema{path = ets_pat({'_', Ns}), _ = ets_pat('_')}),
     ok.
 
+%% @doc Validate load options and name-clash rules before inserting nodes.
+%% Same prefix with the same namespace is additive (several files, one identity).
+-spec prepare_load(map(), schema_source(), [string()]) ->
+          {ok, prefix(), namespace()} | {error, term()}.
+prepare_load(Opts, _Source, TopNames) when is_map(Opts), is_list(TopNames) ->
+    case identity_from_opts(Opts) of
+        {error, _} = Err ->
+            Err;
+        {ok, Prefix, Namespace} ->
+            case validate_prefix(Prefix) of
+                {error, _} = Err ->
+                    Err;
+                ok ->
+                    case check_identity(Prefix, Namespace) of
+                        {error, _} = Err ->
+                            Err;
+                        ok ->
+                            case check_name_clash(Prefix, TopNames) of
+                                {error, _} = Err ->
+                                    Err;
+                                ok ->
+                                    {ok, Prefix, Namespace}
+                            end
+                    end
+            end
+    end.
+
 register_schema(Name) ->
-    case ets:lookup(mgmtd_meta, loaded_schemas) of
+    register_schema(Name, Name, unknown).
+
+register_schema(Prefix, Namespace, Source) ->
+    Info = #{prefix => Prefix, namespace => Namespace, source => Source},
+    case schema_infos() of
         [] ->
-            true = ets:insert(mgmtd_meta, {loaded_schemas, [Name]}),
+            true = ets:insert(mgmtd_meta, {loaded_schemas, [Info]}),
             ok;
-        [{loaded_schemas, Current}] ->
-            case lists:member(Name, Current) of
-                true ->
+        Current ->
+            case [I || #{prefix := P} = I <- Current, P =:= Prefix] of
+                [_|_] ->
                     ok;
-                false ->
-                    true = ets:insert(mgmtd_meta, {loaded_schemas, [Name | Current]}),
+                [] ->
+                    true = ets:insert(mgmtd_meta, {loaded_schemas, [Info | Current]}),
                     ok
             end
     end.
 
 unregister_schema(Name) ->
-    case ets:lookup(mgmtd_meta, loaded_schemas) of
+    case schema_infos() of
         [] ->
             ok;
-        [{loaded_schemas, Current}] ->
-                    true = ets:insert(mgmtd_meta, {loaded_schemas, lists:delete(Name, Current)}),
-                    ok
+        Current ->
+            Rest = [I || #{prefix := P} = I <- Current, P =/= Name],
+            true = ets:insert(mgmtd_meta, {loaded_schemas, Rest}),
+            ok
     end.
 
 registered_schemas() ->
-    case ets:lookup(mgmtd_meta, loaded_schemas) of
-        [] ->
-            [];
-        [{_, Current}] ->
-            Current
-    end.
+    [P || #{prefix := P} <- schema_infos()].
 
 -spec lookup(Path :: item_path()) -> map() | false.
 lookup(Path) ->
-    lookup(?DEFAULT_NS, Path).
+    {Ns, Local} = split_item_path(Path),
+    lookup(Ns, Local).
 
 -spec lookup(NameSpace :: ns(), Path :: item_path()) -> map() | false.
 lookup(Ns, Path) ->
@@ -124,7 +158,8 @@ lookup(Ns, Path) ->
     end.
 
 get_default(Path) ->
-    get_default(?DEFAULT_NS, Path).
+    {Ns, Local} = split_item_path(Path),
+    get_default(Ns, Local).
 
 get_default(Ns, Path) ->
     case lookup(Ns, Path) of
@@ -137,22 +172,25 @@ get_default(Ns, Path) ->
     end.
 
 children(Path) ->
-    children(?DEFAULT_NS, Path, show).
+    children(Path, show).
 
 children(Path, CmdType) ->
-    children(?DEFAULT_NS, Path, CmdType).
+    {Ns, Local} = split_item_path(Path),
+    children(Ns, Local, CmdType).
 
 -spec children(ns(), item_path(), cmd_type()) -> list().
 children(Ns, Path, delete) ->
-    SchemaPath = item_path_to_schema_path(Path),
+    SchemaPath = item_path_to_schema_path(cli_path(Ns, Path)),
     Recs = ets:match_object(mgmtd_commands, #schema{path = {SchemaPath ++ ['_'], Ns}, has_list = true, _ = ets_pat('_')}),
     ?DBG("Found children in schema db at path ~p~n~p~n", [SchemaPath, Recs]),
-    lists:map(fun(R) -> schema_to_map(R, delete) end, Recs);
+    maybe_add_prefixes(Ns, Path, delete,
+                       lists:map(fun(R) -> schema_to_map(R, delete) end, Recs));
 children(Ns, Path, CmdType) ->
-    SchemaPath = item_path_to_schema_path(Path),
+    SchemaPath = item_path_to_schema_path(cli_path(Ns, Path)),
     ?DBG("Finding children in schema db at path ~p~n", [SchemaPath]),
     Recs = ets:match_object(mgmtd_commands, #schema{path = {SchemaPath ++ ['_'], Ns}, _ = ets_pat('_')}),
-    lists:map(fun(R) -> schema_to_map(R, CmdType) end, Recs).
+    maybe_add_prefixes(Ns, Path, CmdType,
+                       lists:map(fun(R) -> schema_to_map(R, CmdType) end, Recs)).
 
 -spec item_path_to_schema_path(item_path()) -> schema_path().
 item_path_to_schema_path([]) ->
@@ -161,6 +199,165 @@ item_path_to_schema_path([P | Ps]) when is_list(P); P =:= '_' ->
     [P | item_path_to_schema_path(Ps)];
 item_path_to_schema_path([P | Ps]) when is_tuple(P) ->
     item_path_to_schema_path(Ps).
+
+%% CLI / config-DB path. Named-prefix schema paths already start with
+%% the prefix name; prepend only when the caller passed a local path.
+-spec cli_path(prefix(), item_path()) -> item_path().
+cli_path(?DEFAULT_NS, Path) ->
+    Path;
+cli_path(Prefix, Path) ->
+    Name = atom_to_list(Prefix),
+    case Path of
+        [Name | _] ->
+            Path;
+        _ ->
+            [Name | Path]
+    end.
+
+%% Split a CLI / config-DB path into {Prefix, SchemaPath}.
+%% Named-prefix schema paths keep the prefix name as the first element.
+-spec split_item_path(item_path()) -> {prefix(), item_path()}.
+split_item_path([]) ->
+    {?DEFAULT_NS, []};
+split_item_path([First | _Rest] = Path) when is_list(First) ->
+    case prefix_from_cli_name(First) of
+        {ok, Prefix} ->
+            {Prefix, Path};
+        false ->
+            {?DEFAULT_NS, Path}
+    end;
+split_item_path(Path) ->
+    {?DEFAULT_NS, Path}.
+
+prefix_from_cli_name(Name) ->
+    case [P || P <- named_prefixes(), atom_to_list(P) =:= Name] of
+        [Prefix] ->
+            {ok, Prefix};
+        _ ->
+            false
+    end.
+
+named_prefixes() ->
+    [P || #{prefix := P} <- schema_infos(), P =/= ?DEFAULT_NS].
+
+schema_infos() ->
+    case ets:lookup(mgmtd_meta, loaded_schemas) of
+        [] ->
+            [];
+        [{_, Infos}] ->
+            Infos
+    end.
+
+maybe_add_prefixes(?DEFAULT_NS, [], delete, Maps) ->
+    Maps ++ prefix_child_maps(delete, fun(#schema{has_list = HasList}) -> HasList end);
+maybe_add_prefixes(?DEFAULT_NS, [], CmdType, Maps) ->
+    Maps ++ prefix_child_maps(CmdType, fun(_) -> true end);
+maybe_add_prefixes(_Ns, _Path, _CmdType, Maps) ->
+    Maps.
+
+prefix_child_maps(CmdType, Pred) ->
+    lists:filtermap(
+      fun(Prefix) ->
+              case ets:lookup(mgmtd_commands, {[atom_to_list(Prefix)], Prefix}) of
+                  [S] ->
+                      case Pred(S) of
+                          true -> {true, schema_to_map(S, CmdType)};
+                          false -> false
+                      end;
+                  [] ->
+                      false
+              end
+      end, named_prefixes()).
+
+%% Named prefix as a real container so load-time flags (has_list, config)
+%% are computed the same way as for any other node.
+-spec prefix_container(prefix(), list()) -> #container{}.
+prefix_container(Prefix, Children) when is_atom(Prefix), is_list(Children) ->
+    Name = atom_to_list(Prefix),
+    #container{name = Name,
+               desc = "Schema prefix " ++ Name,
+               children = fun() -> Children end}.
+
+%% Path is the reverse parent path (not including the list node).
+-spec mark_has_list_descendent(prefix(), [string()]) -> ok.
+mark_has_list_descendent(_Ns, []) ->
+    ok;
+mark_has_list_descendent(Ns, Path) ->
+    SchPath = lists:reverse(Path),
+    [Node] = ets:lookup(mgmtd_commands, {SchPath, Ns}),
+    ets:insert(mgmtd_commands, Node#schema{has_list = true}),
+    mark_has_list_descendent(Ns, tl(Path)).
+
+identity_from_opts(Opts) ->
+    PrefixOpt = maps:get(prefix, Opts, undefined),
+    NsOpt = maps:get(namespace, Opts, undefined),
+    identity_from_opts(PrefixOpt, NsOpt).
+
+identity_from_opts(undefined, undefined) ->
+    {ok, ?DEFAULT_NS, ?DEFAULT_NS};
+identity_from_opts(Prefix, undefined) when is_atom(Prefix) ->
+    {ok, Prefix, Prefix};
+identity_from_opts(undefined, Ns) when is_atom(Ns) ->
+    {ok, Ns, Ns};
+identity_from_opts(undefined, Ns) when is_list(Ns) ->
+    {error, missing_prefix};
+identity_from_opts(Prefix, Ns) when is_atom(Prefix) ->
+    {ok, Prefix, Ns};
+identity_from_opts(Prefix, _Ns) ->
+    {error, {invalid_prefix, Prefix}}.
+
+validate_prefix(Prefix) when is_atom(Prefix) ->
+    Name = atom_to_list(Prefix),
+    case re:run(Name, "^[A-Za-z_][A-Za-z0-9_.-]*$", [{capture, none}]) of
+        match ->
+            ok;
+        nomatch ->
+            {error, {invalid_prefix, Prefix}}
+    end;
+validate_prefix(Prefix) ->
+    {error, {invalid_prefix, Prefix}}.
+
+check_identity(Prefix, Namespace) ->
+    case [I || #{prefix := P} = I <- schema_infos(), P =:= Prefix] of
+        [] ->
+            check_namespace_unique(Prefix, Namespace);
+        [#{namespace := Namespace}] ->
+            ok;
+        [#{namespace := Other}] ->
+            {error, {prefix_namespace_mismatch, Prefix, Other}}
+    end.
+
+check_namespace_unique(_Prefix, Namespace) ->
+    case [P || #{prefix := P, namespace := Ns} <- schema_infos(),
+               Ns =:= Namespace, is_list(Namespace)] of
+        [] ->
+            ok;
+        [OtherPrefix | _] ->
+            {error, {duplicate_namespace, Namespace, OtherPrefix}}
+    end.
+
+check_name_clash(?DEFAULT_NS, TopNames) ->
+    Named = [atom_to_list(P) || P <- named_prefixes()],
+    case [N || N <- TopNames, lists:member(N, Named)] of
+        [] ->
+            ok;
+        [Clash | _] ->
+            {error, {prefix_conflicts_with_node, Clash}}
+    end;
+check_name_clash(Prefix, _TopNames) ->
+    PrefixName = atom_to_list(Prefix),
+    case lists:member(PrefixName, default_top_level_names()) of
+        true ->
+            {error, {prefix_conflicts_with_node, PrefixName}};
+        false ->
+            ok
+    end.
+
+default_top_level_names() ->
+    Recs = ets:match_object(
+             mgmtd_commands,
+             #schema{path = {['_'], ?DEFAULT_NS}, _ = ets_pat('_')}),
+    [Name || #schema{name = Name} <- Recs].
 
 %% ETS match specs use '_' wildcards, which are not valid stored field values.
 -spec ets_pat(term()) -> eqwalizer:dynamic().
@@ -171,36 +368,39 @@ ets_pat(X) -> X.
 ets_tail(Path) -> Path ++ ets_pat('_').
 
 %% @doc Given a path of the form ["server", "servers", {"S1"}, "port"]
-%% return a list of schema items for the same path with any data after
-%% a leaf list considered to be a value.
+%% (or ["example", "server", ...] for a named prefix) return a list of
+%% schema items for the same path with any data after a leaf considered
+%% to be a value. Named prefixes are a loaded root container.
 lookup_path(Path) ->
-    lookup_path(Path, [], []).
+    {Ns, Local} = split_item_path(Path),
+    lookup_path(Ns, Local, [], []).
 
-lookup_path([P | Ps], PathSoFar, [#{node_type := list} = L | Acc]) when is_tuple(P) ->
-    case lookup(PathSoFar) of
-        #{} = Map ->
+lookup_path(Ns, [P | Ps], PathSoFar, [#{node_type := list} = L | Acc]) when is_tuple(P) ->
+    case lookup(Ns, PathSoFar) of
+        #{} ->
             ListItem = L#{key_values := tuple_to_list(P)},
-            lookup_path(Ps, PathSoFar, [ListItem | Acc]);
+            lookup_path(Ns, Ps, PathSoFar, [ListItem | Acc]);
         false ->
             {error, {unknown_path, PathSoFar}}
     end;
-lookup_path([P | Ps], PathSoFar, Acc) ->
+lookup_path(Ns, [P | Ps], PathSoFar, Acc) ->
     NextPath = PathSoFar ++ [P],
-    case lookup(NextPath) of
+    case lookup(Ns, NextPath) of
         #{node_type := Leaf} = Map when ?is_leaf(Leaf)  ->
             [Val | _Pss] = Ps,
             {ok, lists:reverse([Map#{value => Val} | Acc])};
         #{} = Map ->
-            lookup_path(Ps, NextPath, [Map | Acc]);
+            lookup_path(Ns, Ps, NextPath, [Map | Acc]);
         false ->
             {error, {unknown_path, PathSoFar}}
     end;
-lookup_path([], _, Acc) ->
+lookup_path(_Ns, [], _, Acc) ->
     {ok, lists:reverse(Acc)}.
 
-schema_to_map(#schema{path = {Path, _Ns}} = S, CmdType) ->
+schema_to_map(#schema{path = {Path, Ns}} = S, CmdType) ->
     #{role => schema,
       path => Path,
+      ns => Ns,
       node_type => S#schema.node_type,
       name => S#schema.name,
       desc => S#schema.desc,

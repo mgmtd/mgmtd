@@ -46,9 +46,28 @@ Build
 
     $ rebar3 compile
 
+Namespaces
+----------
+
+Each loaded schema has a **prefix** (an atom). JSON and Erlang schemas
+use `#{namespace => Prefix}` at load time; if omitted the prefix is
+`default`. YANG will also keep a namespace URI; the prefix is still
+the CLI / `sys.config` name.
+
+    mgmtd:load_function_schema(Fun).                       % prefix default
+    mgmtd:load_function_schema(Fun, #{namespace => example}).
+    mgmtd:load_json_schema(File, #{namespace => aeternity}).
+
+Default prefix is omitted in the CLI. Named prefixes are a path token:
+
+    set server servers foo port 8080
+    set example server servers foo port 8080
+
+A later sys.config backend will use `{Prefix, Tree}` as the
+application-name grouping.
+
 TODO
 ---
 
-- [ ] Fix completion of existing list keys
-- [ ] Add multiple namespace support with prefixes to handle name clashes at the same level
-- [ ] Finish enum support
+- [x] Fix completion of existing list keys
+- [x] Finish enum support

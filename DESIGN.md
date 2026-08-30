@@ -1,35 +1,122 @@
 Internal design
 ---------------
 
-The cfg application provides a schema driven tree database with long
-lived session transactions for updating multiple entries atomically.
+mgmtd is a schema-driven tree database with long-lived session
+transactions for updating multiple entries atomically.
 
 
 
 Schema
 ------
 
-The Schema used is yang compatible opening the door to future use of
-yang modules as a source of the schema.
+The internal model is YANG: containers, lists, leafs, and leaf-lists.
+JSON Schema draft-07 is mapped onto those node types. YANG module
+files are not loaded yet.
 
-Today the database schema is created by the managed system using the
-APIs provided here.
+A schema is loaded before the configuration database. Sources:
 
-The managed system must define a tree of nodes and leafs using the
-functions in the cfg module:
+* Erlang records (`#container{}`, `#list{}`, `#leaf{}`, `#leaf_list{}`
+  from `mgmtd.hrl`) via `mgmtd:load_function_schema/1,2`
+* JSON Schema draft-07 files via `mgmtd:load_json_schema/1,2`
+* YANG modules later
 
-* cfg:container/4 - create a container node with children
+Function schemas
+----------------
 
-* cfg:list/4 - create a node to act as parent to a list of other trees or leafs
+The host defines a tree of records and a zero-arity function that
+returns the top-level nodes:
 
-* cfg:leaf_list - create a node to hold a list of single typed values
-                  e.g numbers or strings
+    -include_lib("mgmtd/include/mgmtd.hrl").
 
-* cfg:leaf - create a node to hole a single typed value
+    cfg_schema() ->
+        [#container{name = "server",
+                    desc = "Server configuration",
+                    config = true,
+                    children = fun server_list_schema/0}].
 
-The managed system must then install the schema by calling
-cfg:load_schema/1 with a list of functions that will create the
-top level nodes of the tree.
+    server_list_schema() ->
+        [#list{name = "servers",
+               key_names = ["name"],
+               children = fun server_schema/0}].
+
+    server_schema() ->
+        [#leaf{name = "name", type = string, desc = "Server name"},
+         #leaf{name = "port", type = 'inet:port-number', default = 80,
+               desc = "Listen port"}].
+
+    mgmtd:load_function_schema(fun cfg_schema/0).
+    mgmtd:load_function_schema(fun cfg_schema/0, #{namespace => example}).
+
+Records, not constructor functions. Children are thunks so the tree
+can be built lazily as the CLI walks it. `config = true` on a node
+starts a configuration tree; descendants inherit it.
+
+JSON Schema
+-----------
+
+JSON objects become containers, arrays of objects become lists
+(optional `"keys"` extension, otherwise a generated integer `"index"`
+key for config data), arrays of scalars become leaf-lists. Load
+options include `config`, `callback`, and `namespace` / `prefix`.
+
+    mgmtd:load_json_schema("priv/schema.json").
+    mgmtd:load_json_schema("priv/schema.json", #{namespace => aeternity,
+                                                 config => true}).
+
+The file must declare `"$schema": "http://json-schema.org/draft-07/schema#"`.
+
+Loaded form
+-----------
+
+Every source is stored as `#schema{}` records in the `mgmtd_commands`
+ETS table, keyed `{Path, Prefix}`. A named prefix is inserted first as
+a `#container{}` and loaded with the same `load_node` path as any other
+container, so flags computed during load (`has_list` when a descendant
+is a list, inherited `config`) live on that node. Descendant schema
+paths start with the prefix name.
+
+JSON Schema currently still inserts its own nodes as `#schema{}`
+records; it uses the same prefix-container and `has_list` walk. A later
+split between *reading* a schema (records) and *loading* it would run
+JSON and YANG through that single `load_node` path.
+
+Lookups for the CLI return maps (`schema_children/2,3`) with a
+`children` fun closed over the prefix. ecli does not know about
+namespaces.
+
+Namespaces and prefixes
+-----------------------
+
+YANG modules have a namespace URI and a short prefix. JSON Schema and
+Erlang function schemas have only a prefix; it is the namespace.
+
+Prefix is the operational identity:
+
+- ETS schema key `{LocalPath, Prefix}`
+- CLI path token for named prefixes (`set example server ...`)
+- Future `sys.config` application-name slot (`{example, [...]}`)
+- `mgmtd:remove_schema/1` / `mgmtd:registered_schemas/0`
+
+The default prefix (`default`) is silent: CLI, schema paths, and
+`#cfg.path` stay `["server", "servers", ...]`. A named prefix is a real
+root container; schema, CLI, and config-DB paths all start with it:
+
+    ["example", "server", "servers", {"foo"}, "port"]
+
+`sys.config` export will wrap default rows as `{default, Tree}` so they
+are not dumped as fake OTP apps. Named prefixes already match
+`{Prefix, Tree}` as the children of that root container.
+
+Load options:
+
+    #{namespace => example}                          % JSON / Erlang prefix
+    #{prefix => 'if', namespace => "urn:ietf:..."}   % YANG later
+
+Erlang schemas take the prefix as a load option, not a field on
+`#container{}` / `#leaf{}`. Several files may share one prefix
+(additive). A named prefix must not collide with a default-schema
+top-level node name. A prefix cannot be reused with a different
+namespace URI. A URI-only load without a prefix is rejected.
 
 
 
@@ -40,11 +127,16 @@ Creating a transaction
 ----------------------
 
 A configuration transaction is created typically when the user
-switches to configuration mode in the CLI.
+switches to configuration mode in the CLI:
+
+    Txn = mgmtd:txn_new()
 
 The new transaction creates a full copy of the configuration
-database in a transaction local ets table. cfg_db:copy_to_ets() will
-grab a copy of the database from whichever storage backend is used.
+database in a transaction local ets table. mgmtd_cfg_db:copy_to_ets()
+grabs a copy from whichever storage backend is used.
+
+Edits use `mgmtd:txn_set/2`, `mgmtd:txn_delete/2`, `mgmtd:txn_show/2`,
+and `mgmtd:txn_commit/1`.
 
 Setting a value
 ---------------
@@ -110,20 +202,13 @@ I'm not sure whether this is supported by Yang?
 Multiple list items in the schema at the same level is prevented by
 the schema loader
 
-Namespaces
-----------
-
-In yang all nodes exist in an XML style namespace. This is supported,
-but optional here. Any schema nodes without a namespace are put in a
-global table with namespace set to the atom 'default'.
-
 Database backends
 -----------------
 
-The system is designed to support different storage backends
-The storage engine is configurable when calling cfg:init/2
+The system is designed to support different storage backends.
+The storage engine is configurable when calling mgmtd_cfg_db:init/2.
 
-Storage backends must provide set of functions to mirror the mnesia API:
+Storage backends must provide a set of functions to mirror the mnesia API:
 
 init() - Called once at startup to allow the backend to create tables / init schema etc.
 
@@ -133,8 +218,8 @@ read(Key) - read entry at Key
 
 write(#cfg{} = Record) - write Record to the config table
 
-Fun can use cfg_db:read/1, cfg_db:write/1 which will be re-directed to
-the backend specific functions.
+Fun can use mgmtd_cfg_db:read/1, mgmtd_cfg_db:write/1 which will be
+re-directed to the backend specific functions.
 
 Children
 ========
@@ -179,7 +264,7 @@ configuration.
 
 A process can subscribe to changes using
 
-    {ok, Ref} = cfg:subscribe(Path, Pid)
+    {ok, Ref} = mgmtd:subscribe(Path, Pid)
 
 where Path is the path to the part of the tree of interest as a list
 of path names e.g. ["server", "servers"], and Pid is the Pid of the
@@ -188,7 +273,7 @@ e.g. ["server", "servers", {"host1"}, "port"]
 
 Configuration changes are delivered as a message {updated_config, Ref,
 UpdatedConfig} where Ref is the reference returned by the call to
-cfg:subscribe/2
+mgmtd:subscribe/2
 
 UpdatedConfig depends on the type of node that is subscribed to:
 
@@ -254,6 +339,5 @@ Next up
  - get enum values working for all schema types
  - get the rest of the yang datatypes working
  - add yang schema support
- - add namespace support
- - add sys.config style database where namespace maps to application name
+ - add sys.config style database where prefix maps to application name
  - add pipe commands

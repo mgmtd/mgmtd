@@ -48,7 +48,10 @@ start() ->
 %% Options:
 %% config => true | false (default false)
 %% callback => Module::atom()
-%% namespace => NameSpace::string()
+%% namespace => Prefix::atom()   %% CLI / sys.config identity; default is 'default'
+%% prefix => Prefix::atom()      %% optional; if omitted, namespace is the prefix
+%%                               %% For YANG later: namespace is a URI string and
+%%                               %% prefix is required.
 
 load_json_schema(File) ->
     mgmtd_schema:load_json_schema_file(File, #{config => false}).
@@ -166,32 +169,37 @@ schema_children(Ns, Path, CmdType) ->
 
 -spec lookup(item_path()) -> {ok, any()} | {error, unknown_schema_path}.
 lookup(Path) ->
-    lookup(?DEFAULT_NS, Path).
+    {Ns, Local} = mgmtd_schema:split_item_path(Path),
+    lookup_at(Ns, Local, Path).
 
 -spec lookup(ns(), item_path()) -> {ok, any()} | {error, unknown_schema_path}.
 lookup(Ns, Path) ->
-    SchemaPath = lists:filter(fun(El) -> not is_tuple(El) end, Path),
+    lookup_at(Ns, Path, mgmtd_schema:cli_path(Ns, Path)).
+
+lookup_at(Ns, Local, DbPath) ->
+    SchemaPath = lists:filter(fun(El) -> not is_tuple(El) end,
+                              mgmtd_schema:cli_path(Ns, Local)),
     case mgmtd_schema:lookup(Ns, SchemaPath) of
         false ->
             {error, unknown_schema_path};
         #{node_type := list, key_names := Keys} ->
-            case lists:last(Path) of
+            case lists:last(DbPath) of
                 ListKey when is_tuple(ListKey) ->
                     %% It's a full path to a list entry, return the
                     %% names of the children of the list key
-                    Cs = mgmtd_schema:children(SchemaPath),
+                    Cs = mgmtd_schema:children(Ns, SchemaPath, show),
                     {ok, lists:map(fun(#{name := Name}) -> Name end, Cs)};
                 _ ->
-                    %% User looked up the list key itself, return the list keys
-                    Pattern = erlang:make_tuple(length(Keys), '_'),
-                    {ok, mgmtd_cfg_db:list_keys(Path)}
+                    %% User looked up the list itself, return the list keys
+                    _Pattern = erlang:make_tuple(length(Keys), '_'),
+                    {ok, mgmtd_cfg_db:list_keys(DbPath)}
             end;
         #{node_type := container} ->
-            Cs = mgmtd_schema:children(SchemaPath),
+            Cs = mgmtd_schema:children(Ns, SchemaPath, show),
             {ok, lists:map(fun(#{name := Name}) -> Name end, Cs)};
         #{node_type := Leaf, default := Default} when Leaf == leaf;
                                                       Leaf == leaf_list ->
-            case mgmtd_cfg_db:lookup(Path) of
+            case mgmtd_cfg_db:lookup(DbPath) of
                 [#cfg{value = Value}] ->
                     {ok, Value};
                 [] when Default == undefined ->

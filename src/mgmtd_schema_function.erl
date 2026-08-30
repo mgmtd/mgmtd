@@ -1,15 +1,37 @@
 -module(mgmtd_schema_function).
 
--export([load/2]).
+-export([load/2, load_node/4]).
 
 -include("../include/mgmtd.hrl").
 -include("mgmtd_schema.hrl").
 
 load(Fun, Opts) when is_function(Fun) ->
-    NameSpace = maps:get(namespace, Opts, ?DEFAULT_NS),
     IsConfig = maps:get(config, Opts, false),
-    ok = load(Fun, [], NameSpace, IsConfig),
-    mgmtd_schema:register_schema(NameSpace).
+    Nodes = Fun(),
+    TopNames = node_names(Nodes),
+    case mgmtd_schema:prepare_load(Opts, function, TopNames) of
+        {ok, Prefix, Namespace} ->
+            ok = load_nodes(Prefix, Nodes, IsConfig),
+            mgmtd_schema:register_schema(Prefix, Namespace, function);
+        {error, _} = Err ->
+            Err
+    end.
+
+load_nodes(?DEFAULT_NS, Nodes, IsConfig) ->
+    lists:foreach(fun(Child) ->
+                          load_node(Child, [], ?DEFAULT_NS, IsConfig)
+                  end, Nodes);
+load_nodes(Prefix, Nodes, IsConfig) ->
+    Name = atom_to_list(Prefix),
+    case ets:lookup(mgmtd_commands, {[Name], Prefix}) of
+        [] ->
+            load_node(mgmtd_schema:prefix_container(Prefix, Nodes),
+                      [], Prefix, IsConfig);
+        [_] ->
+            lists:foreach(fun(Child) ->
+                                  load_node(Child, [Name], Prefix, IsConfig)
+                          end, Nodes)
+    end.
 
 load(Fun, Path, Ns, IsConfig) ->
     lists:foreach(fun(Child) ->
@@ -21,6 +43,7 @@ load_node(#container{name = Name, desc = Desc, config = Config0} = Node, Path, N
     FullPath = lists:reverse([Name | Path]),
     Container =
         #schema{path = {FullPath, Ns},
+                prefix = Ns,
                 node_type = container,
                 name = Name,
                 desc = Desc,
@@ -33,6 +56,7 @@ load_node(#list{name = Name, desc = Desc, key_names = KeyNames, config = Config0
     FullPath = lists:reverse([Name | Path]),
     LeafList =
         #schema{path = {FullPath, Ns},
+                prefix = Ns,
                 node_type = list,
                 name = Name,
                 key_names = KeyNames,
@@ -44,13 +68,14 @@ load_node(#list{name = Name, desc = Desc, key_names = KeyNames, config = Config0
                 config = Config},
                                                 % io:format(user, "L - ~p~n", [lists:reverse(Path)]),
     true = ets:insert_new(mgmtd_commands, LeafList),
-    ok = mark_has_list_descendent(Ns, Path),
+    ok = mgmtd_schema:mark_has_list_descendent(Ns, Path),
     load(Node#list.children, [Name | Path], Ns, Config);
 load_node(#leaf{name = Name, desc = Desc, type = Type, default = Default, config = Config0} = Node, Path, Ns, IsConfig) ->
     Config = inherited_config(Config0, IsConfig),
     FullPath = lists:reverse([Name | Path]),
     Leaf =
         #schema{path = {FullPath, Ns},
+                prefix = Ns,
                 node_type = leaf,
                 name = Name,
                 type = Type,
@@ -65,6 +90,7 @@ load_node(#leaf_list{name = Name, desc = Desc, type = Type, config = Config0} = 
     FullPath = lists:reverse([Name | Path]),
     LeafList =
         #schema{path = {FullPath, Ns},
+                prefix = Ns,
                 node_type = leaf_list,
                 name = Name,
                 type = Type,
@@ -91,15 +117,6 @@ node_name(#leaf{name = Name}) -> Name;
 node_name(#leaf_list{name = Name}) -> Name;
 node_name(#list{name = Name}) -> Name;
 node_name(#container{name = Name}) -> Name.
-
-mark_has_list_descendent(_Ns, []) ->
-    ok;
-mark_has_list_descendent(Ns, Path) ->
-    SchPath = lists:reverse(Path),
-    [Node] = ets:lookup(mgmtd_commands, {SchPath, Ns}),
-    ets:insert(mgmtd_commands, Node#schema{has_list = true}),
-    mark_has_list_descendent(Ns, tl(Path)).
-
 
 %% config is true only inside a config tree: a node with config = true
 %% starts a tree, and descendants inherit true even if they leave the

@@ -17,9 +17,16 @@ load_file(File, Opts) ->
     load_json_schema(Schema, maps:merge(#{config => false}, Opts)).
 
 load_json_schema(#{<<"$schema">> := ?DRAFT7_SCHEMA} = Schema, Opts) ->
-    NameSpace = maps:get(namespace, Opts, ?DEFAULT_NS),
-    ok = load_json_schema(Schema, [], NameSpace, Opts),
-    mgmtd_schema:register_schema(NameSpace);
+    Props = maps:get(<<"properties">>, Schema, #{}),
+    TopNames = [binary_to_list(K) || K <- maps:keys(Props)],
+    case mgmtd_schema:prepare_load(Opts, json, TopNames) of
+        {ok, Prefix, Namespace} ->
+            ParentPath = ensure_prefix_container(Prefix, Opts),
+            ok = load_json_schema(Schema, ParentPath, Prefix, Opts),
+            mgmtd_schema:register_schema(Prefix, Namespace, json);
+        {error, _} = Err ->
+            Err
+    end;
 load_json_schema(#{<<"$schema">> := Other}, _Opts) ->
     {error, {unsupported_json_schema, Other}};
 load_json_schema(_Schema, _Opts) ->
@@ -42,6 +49,7 @@ load_json_property(#{<<"type">> := <<"object">>} = Object,
     %% A container
     Container =
         #schema{path = {lists:reverse(Path), Ns},
+                prefix = Ns,
                 node_type = container,
                 name = Key,
                 desc = json_desc(Object),
@@ -64,6 +72,7 @@ load_json_property(#{<<"type">> := <<"array">>} = Object,
 
             LeafList =
                 #schema{path = {lists:reverse(Path), Ns},
+                        prefix = Ns,
                         node_type = leaf_list,
                         name = Key,
                         type = json_item_type(Item),
@@ -100,6 +109,7 @@ load_json_property(#{<<"type">> := <<"array">>} = Object,
 
             List =
                 #schema{path = {lists:reverse(Path), Ns},
+                        prefix = Ns,
                         node_type = list,
                         name = Key,
                         desc = json_desc(Object),
@@ -107,9 +117,11 @@ load_json_property(#{<<"type">> := <<"array">>} = Object,
                         min_elements = maps:get(<<"minItems">>, Object, 0),
                         max_elements = maps:get(<<"maxItems">>, Object, unlimited),
                         mandatory = false,
+                        has_list = true,
                         data_callback = maps:get(callback, Opts, mgmtd),
                         config = Config},
             true = ets:insert_new(mgmtd_commands, List),
+            ok = mgmtd_schema:mark_has_list_descendent(Ns, tl(Path)),
             Items = maps:get(<<"items">>, Object),
             load_json_properties(maps:get(<<"properties">>, Items), Path, Ns, Opts)
     end;
@@ -118,6 +130,7 @@ load_json_property(#{} = Item, Key, Path, Ns, #{config := Config}) ->
     Default = json_default(Type, Item),
     Leaf =
         #schema{path = {lists:reverse(Path), Ns},
+                prefix = Ns,
                 node_type = leaf,
                 name = Key,
                 type = json_item_type(Item),
@@ -128,10 +141,26 @@ load_json_property(#{} = Item, Key, Path, Ns, #{config := Config}) ->
                                                 %io:format(user, "L - ~p~n", [lists:reverse(Path)]),
     true = ets:insert_new(mgmtd_commands, Leaf).
 
+ensure_prefix_container(?DEFAULT_NS, _Opts) ->
+    [];
+ensure_prefix_container(Prefix, Opts) ->
+    Name = atom_to_list(Prefix),
+    Config = maps:get(config, Opts, false),
+    case ets:lookup(mgmtd_commands, {[Name], Prefix}) of
+        [] ->
+            mgmtd_schema_function:load_node(
+              mgmtd_schema:prefix_container(Prefix, []),
+              [], Prefix, Config);
+        [_] ->
+            ok
+    end,
+    [Name].
+
 %% When no index is provided by the schema insert an integer based
 %% one with name index
 generated_index_leaf(Path, Ns, Config) ->
     #schema{path = {lists:reverse(["index" | Path]), Ns},
+            prefix = Ns,
             node_type = leaf,
             name = "index",
             type = uint64,
