@@ -26,7 +26,8 @@
 
 %% Dirty operations
 -export([select/2,
-         lookup/1
+         lookup/1,
+         match_object/1
         ]).
 
 %%--------------------------------------------------------------------
@@ -94,6 +95,9 @@ lookup(Path) ->
 
 select(Path, Pattern) ->
     mnesia:dirty_select(cfg, [{#cfg{path = mgmtd_schema:ets_pat(Path ++ [Pattern]), _ = mgmtd_schema:ets_pat('_')}, [], ['$1']}]).
+
+match_object(Pattern) ->
+    mnesia:dirty_match_object(cfg, Pattern).
 
 -spec copy_to_ets() -> ets:table().
 copy_to_ets() ->

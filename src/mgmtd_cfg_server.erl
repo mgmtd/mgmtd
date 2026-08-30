@@ -109,7 +109,7 @@ init([]) ->
           {stop, Reason :: term(), Reply :: term(), NewState :: #state{}} |
           {stop, Reason :: term(), NewState :: #state{}}.
 handle_call({subscribe, Path, Pid}, _From, State) when is_pid(Pid) ->
-    case initial_subscription_message(Path) of
+    try initial_subscription_message(Path) of
         {error, _Reason} = Err ->
             {reply, Err, State};
         {ok, Config} ->
@@ -118,9 +118,11 @@ handle_call({subscribe, Path, Pid}, _From, State) when is_pid(Pid) ->
             ets:insert(State#state.subs, {{Path, Pid, Ref}, []}),
             ets:insert(State#state.sub_refs, {Ref, {Path, Pid, MonRef}}),
             ets:insert(State#state.sub_pids, {Pid, {Path, Ref}}),
-            %%io:format(user, "Sending subscribe subscription messages ~p~n", [{Pid, {updated_config, Ref, Config}}]),
             Pid ! {updated_config, Ref, Config},
             {reply, {ok, Ref}, State}
+    catch
+        error:db_not_initialized ->
+            {reply, {error, db_not_initialized}, State}
     end;
 handle_call({unsubscribe, Ref}, _From, State) ->
     case ets:lookup(State#state.sub_refs, Ref) of
@@ -279,7 +281,9 @@ initial_subscription_message(Path) ->
                     {ok, [{N, Val}]};
                 false ->
                     {error, no_value}
-            end
+            end;
+        false ->
+            {error, unknown_schema_path}
     end.
 
 %% Subscription messages on transaction commit

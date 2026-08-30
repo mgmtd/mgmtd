@@ -44,7 +44,8 @@
 
 %% Dirty operations
 -export([select/2,
-         lookup/1]).
+         lookup/1,
+         match_object/1]).
 
 -export([format_consult/1]).
 
@@ -134,6 +135,9 @@ select(Path, Pattern) ->
                [{#cfg{path = mgmtd_schema:ets_pat(Path ++ [Pattern]),
                       _ = mgmtd_schema:ets_pat('_')},
                  [], ['$1']}]).
+
+match_object(Pattern) ->
+    ets:match_object(?TABLE, Pattern).
 
 -spec copy_to_ets() -> ets:table().
 copy_to_ets() ->

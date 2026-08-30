@@ -44,7 +44,8 @@ list_item_test_() ->
       fun create_list_item_keys_only_commit_then_set_leaf/0,
       fun create_second_list_item_keys_only/0,
       fun create_list_item_keys_only_idempotent/0,
-      fun create_list_item_keys_only_invalid_keys/0
+      fun create_list_item_keys_only_invalid_keys/0,
+      fun show_committed_without_txn/0
      ]}.
 
 create_and_delete_list_item() ->
@@ -216,6 +217,29 @@ create_list_item_keys_only_invalid_keys() ->
     ?assertEqual({error, "Invalid IP Address"},
                  txn_set(Txn, ["client", "clients", {"127.0.a.b", "82"}])).
 
+%% `show configuration` from operational mode (Txn = undefined) must
+%% read committed config from the backend, not a leftover named ETS
+%% table `cfg`.
+show_committed_without_txn() ->
+    ?assertEqual({ok, []}, mgmtd:txn_show(undefined, [])),
+    ?assertEqual([], mgmtd:list_keys(undefined, ["server", "servers"], '$1')),
+
+    {ok, Txn} = txn_set(mgmtd:txn_new(),
+                        ["server", "servers", {"web1"}, "port", "81"]),
+    {ok, Txn2} = mgmtd:txn_commit(Txn),
+    {ok, FromTxn} = mgmtd:txn_show(Txn2, []),
+    {ok, FromCommitted} = mgmtd:txn_show(undefined, []),
+    ?assertEqual(FromTxn, FromCommitted),
+    ?assertMatch([{"server", _}], FromCommitted),
+    ?assertEqual([{"web1"}],
+                 mgmtd:list_keys(undefined, ["server", "servers"], '$1')),
+
+    {ok, ServerSchema} = mgmtd_schema:lookup_path(["server"]),
+    {ok, Subtree} = mgmtd:txn_show(undefined, ServerSchema),
+    ?assertMatch([{"servers", _}], Subtree),
+
+    {ok, _} = txn_delete_commit(Txn2, ["server", "servers", {"web1"}]).
+
 txn_set(Txn, Path) ->
     {ok, SchemaPath} = mgmtd_schema:lookup_path(Path),
     mgmtd:txn_set(Txn, SchemaPath).
@@ -223,6 +247,10 @@ txn_set(Txn, Path) ->
 txn_delete(Txn, Path) ->
     {ok, SchemaPath} = mgmtd_schema:lookup_path(Path),
     mgmtd:txn_delete(Txn, SchemaPath).
+
+txn_delete_commit(Txn, Path) ->
+    {ok, Txn2} = txn_delete(Txn, Path),
+    mgmtd:txn_commit(Txn2).
 
 sort_ok({ok, List}) ->
     {ok, lists:sort(List)}.

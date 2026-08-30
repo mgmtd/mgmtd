@@ -66,13 +66,21 @@ get(#cfg_txn{ets_copy = Copy}, Path) ->
             mgmtd_schema:get_default(Path)
     end.
 
+%% Operational mode (no config txn) reads committed config from the
+%% backend. There is no named ETS table `cfg` — that was leftover from
+%% an earlier ETS-only store.
 get_tree(undefined, Path) ->
-    get_tree(#cfg_txn{ets_copy = cfg}, Path);
+    get_tree_from(permanent, Path);
 get_tree(#cfg_txn{ets_copy = Copy}, Path) ->
+    get_tree_from({ets, Copy}, Path).
+
+get_tree_from(Db, Path) ->
     ?DBG("Path = ~p~n",[Path]),
     Key = mgmtd_cfg_db:schema_path_to_key(Path),
     ?DBG("Key = ~p~n",[Key]),
-    Rows = ets:match_object(Copy, #cfg{path = mgmtd_schema:ets_tail(Key), _ = mgmtd_schema:ets_pat('_')}),
+    Rows = mgmtd_cfg_db:match_object(
+             Db, #cfg{path = mgmtd_schema:ets_tail(Key),
+                      _ = mgmtd_schema:ets_pat('_')}),
     SubRows = drop_path_prefix(Key, Rows),
     Tree = mgmtd_cfg_db:cfg_list_to_tree(SubRows),
     %% ?DBG("Tree ~p~n",[Tree]),
@@ -122,9 +130,9 @@ delete(#cfg_txn{ets_copy = Copy, ops = Ops} = Txn, Path) ->
     {ok, Txn#cfg_txn{ops = [{delete, Path} | Ops]}}.
 
 list_keys(undefined, Path, Pattern) ->
-    list_keys(#cfg_txn{ets_copy = cfg}, Path, Pattern);
+    mgmtd_cfg_db:list_keys(Path, Pattern);
 list_keys(#cfg_txn{ets_copy = Copy}, Path, Pattern) ->
-    ets:select(Copy, [{#cfg{path = mgmtd_schema:ets_pat(Path ++ [Pattern]), _ = mgmtd_schema:ets_pat('_')}, [], ['$1']}]).
+    mgmtd_cfg_db:list_keys({ets, Copy}, Path, Pattern).
 
 
 

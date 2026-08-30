@@ -106,7 +106,8 @@ sys_config_test_() ->
       fun reload_from_file/0,
       fun compound_key_roundtrip/0,
       fun enum_and_defaults_roundtrip/0,
-      fun load_handwritten_sys_config/0]}.
+      fun load_handwritten_sys_config/0,
+      fun show_from_operational_mode/0]}.
 
 namespace_sys_config_test_() ->
     {setup, fun ns_setup/0, fun ns_teardown/1,
@@ -169,6 +170,16 @@ enum_and_defaults_roundtrip() ->
     {default, Tree} = hd(Term),
     Interface = proplists:get_value(interface, Tree),
     ?assertEqual("1GbE", proplists:get_value(speed, Interface)).
+
+%% Operational `show configuration` (no txn) against the sys_config
+%% ETS table `mgmtd_cfg` — not a leftover named table `cfg`.
+show_from_operational_mode() ->
+    ?assertEqual({ok, []}, mgmtd:txn_show(undefined, [])),
+    {ok, Txn} = commit_set(["server", "servers", {"web1"}, "port", "81"]),
+    {ok, FromTxn} = mgmtd:txn_show(Txn, []),
+    {ok, FromCommitted} = mgmtd:txn_show(undefined, []),
+    ?assertEqual(FromTxn, FromCommitted),
+    ?assertMatch([{"server", _}], FromCommitted).
 
 load_handwritten_sys_config() ->
     ok = mgmtd_cfg_db:remove_db(?DB_DIR, [{backend, sys_config}]),

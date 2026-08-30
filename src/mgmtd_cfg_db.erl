@@ -17,7 +17,8 @@
 -export([cfg_list_to_tree/1, simplify_tree/1, schema_path_to_key/1]).
 
 %% Dirty operations towards current config database
--export([lookup/1, lookup/2, list_keys/1, list_keys/2, list_keys/3]).
+-export([lookup/1, lookup/2, list_keys/1, list_keys/2, list_keys/3,
+         match_object/1, match_object/2]).
 
 %%--------------------------------------------------------------------
 %% Wrapper functions around the operations towards the chosen storage
@@ -95,11 +96,25 @@ match_delete({ets, Ets}, Pattern) ->
 match(Pattern) ->
     match(permanent, Pattern).
 
+%% Transactional match (used inside backend:transaction/1 on commit).
 match(permanent, Pattern) ->
     BackendMod = backend(),
     BackendMod:match(Pattern);
 match({ets, Ets}, Pattern) ->
-    to_ok(ets:match(Ets, Pattern)).
+    ets:match_object(Ets, Pattern).
+
+%% Dirty / lock-free match of #cfg{} records. Used for operational-mode
+%% show, which has no txn and must not enter a backend transaction.
+-spec match_object(term()) -> [#cfg{}].
+match_object(Pattern) ->
+    match_object(permanent, Pattern).
+
+-spec match_object(permanent | {ets, ets:table()}, term()) -> [#cfg{}].
+match_object(permanent, Pattern) ->
+    BackendMod = backend(),
+    BackendMod:match_object(Pattern);
+match_object({ets, Ets}, Pattern) ->
+    ets:match_object(Ets, Pattern).
 
 list_keys(Path) ->
     list_keys(Path, '$1').
@@ -118,8 +133,12 @@ copy_to_ets() ->
     BackendMod:copy_to_ets().
 
 backend() ->
-    [{_, Mod}] = ets:lookup(mgmtd_meta, backend),
-    Mod.
+    case ets:lookup(mgmtd_meta, backend) of
+        [{_, Mod}] ->
+            Mod;
+        [] ->
+            error(db_not_initialized)
+    end.
 
 backend_mod(mnesia) -> mgmtd_cfg_db_mnesia;
 backend_mod(json)   -> mgmtd_cfg_db_json;
