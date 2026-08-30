@@ -28,13 +28,17 @@
 %% @doc Called once at startup to allow the chosen database backend to
 %% create tables etc.
 %% --------------------------------------------------------------------
--spec init(file:filename(), proplists:proplist()) -> ok.
+-spec init(file:filename(), proplists:proplist()) -> ok | {error, term()}.
 init(DbLocation, Opts) ->
     Backend = proplists:get_value(backend, Opts, json),
     BackendMod = backend_mod(Backend),
-    BackendMod:init(DbLocation, Opts),
-    ets:insert(mgmtd_meta, {backend, BackendMod}),
-    to_ok(ets:insert(mgmtd_meta, {db_location, DbLocation})).
+    case BackendMod:init(DbLocation, Opts) of
+        ok ->
+            ets:insert(mgmtd_meta, {backend, BackendMod}),
+            to_ok(ets:insert(mgmtd_meta, {db_location, DbLocation}));
+        {error, _} = Err ->
+            Err
+    end.
 
 remove_db(DbLocation, Opts) ->
     Backend = proplists:get_value(backend, Opts, json),
@@ -119,7 +123,8 @@ backend() ->
 
 backend_mod(mnesia) -> mgmtd_cfg_db_mnesia;
 backend_mod(json)   -> mgmtd_cfg_db_json;
-backend_mod(config) -> mgmtd_cfg_db_config.
+backend_mod(config) -> mgmtd_cfg_db_config;
+backend_mod(sys_config) -> mgmtd_cfg_db_sys_config.
 
 to_ok(true) -> ok;
 to_ok(Else) -> Else.
