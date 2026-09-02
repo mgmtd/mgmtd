@@ -14,6 +14,10 @@
 %%% than path-tuple keys, which is the form operators already write in
 %%% application env. The in-memory store is still `#cfg{}` records.
 %%%
+%%% A schema node may name `{codec, Mod}` in `opts`. At that node the
+%%% default proplist value is rewritten by `Mod:export/1` / `Mod:import/1`
+%%% (see `mgmtd_codec`). Codecs do not nest.
+%%%
 %%% On-disk output is a single Erlang term followed by a period, with
 %%% unlimited print depth, so it is always readable by `file:consult/1`.
 %%% The live file is replaced only after a temp file has been consulted
@@ -202,12 +206,17 @@ restore(Tab, Snapshot) ->
     end.
 
 persist(Tab, File) ->
-    Term = cfg_to_term(ets:tab2list(Tab)),
-    case consultable(Term) of
-        false ->
-            {error, {not_consultable, Term}};
-        true ->
-            write_consult_file(File, Term)
+    try cfg_to_term(ets:tab2list(Tab)) of
+        Term ->
+            case consultable(Term) of
+                false ->
+                    {error, {not_consultable, Term}};
+                true ->
+                    write_consult_file(File, Term)
+            end
+    catch
+        throw:{export_error, Reason} ->
+            {error, {export_error, Reason}}
     end.
 
 write_consult_file(File, Term) ->
@@ -289,19 +298,36 @@ export_nodes(Nodes) when is_list(Nodes) ->
 export_nodes(_) ->
     [].
 
-export_node(#cfg{node_type = container, name = Name, value = Children}) ->
-    {to_key(Name), export_nodes(Children)};
-export_node(#cfg{node_type = list, name = Name, value = Items}) when is_list(Items) ->
-    {to_key(Name), [export_list_item(I) || I <- lists:keysort(#cfg.name, Items)]};
-export_node(#cfg{node_type = list, name = Name, value = _}) ->
-    {to_key(Name), []};
-export_node(#cfg{node_type = leaf, name = Name, value = Value}) ->
-    {to_key(Name), Value};
-export_node(#cfg{node_type = leaf_list, name = Name, value = Value}) ->
-    {to_key(Name), Value}.
+export_node(#cfg{node_type = container, name = Name, path = Path, value = Children}) ->
+    {to_key(Name), maybe_codec_export(Path, export_nodes(Children))};
+export_node(#cfg{node_type = list, name = Name, path = Path, value = Items}) when is_list(Items) ->
+    Default = [export_list_item(I) || I <- lists:keysort(#cfg.name, Items)],
+    {to_key(Name), maybe_codec_export(Path, Default)};
+export_node(#cfg{node_type = list, name = Name, path = Path, value = _}) ->
+    {to_key(Name), maybe_codec_export(Path, [])};
+export_node(#cfg{node_type = leaf, name = Name, path = Path, value = Value}) ->
+    {to_key(Name), maybe_codec_export(Path, Value)};
+export_node(#cfg{node_type = leaf_list, name = Name, path = Path, value = Value}) ->
+    {to_key(Name), maybe_codec_export(Path, Value)}.
 
 export_list_item(#cfg{node_type = list_key, value = Children}) ->
     export_nodes(Children).
+
+maybe_codec_export(Path, DefaultVal) ->
+    case mgmtd_schema:codec(Path) of
+        undefined ->
+            DefaultVal;
+        Mod ->
+            Mod:export(DefaultVal)
+    end.
+
+maybe_codec_import(Schema, Val) ->
+    case mgmtd_schema:codec(Schema) of
+        undefined ->
+            Val;
+        Mod ->
+            Mod:import(Val)
+    end.
 
 to_key(Name) when is_atom(Name) ->
     Name;
@@ -363,12 +389,12 @@ import_node(Tab, Path, {Key, Val}) ->
     Name = from_key(Key),
     FullPath = Path ++ [Name],
     case mgmtd_schema:lookup(FullPath) of
-        #{node_type := container} ->
-            import_nodes(Tab, FullPath, Val);
-        #{node_type := list, key_names := KeyNames} ->
-            import_list(Tab, FullPath, KeyNames, Val);
-        #{node_type := Leaf} when ?is_leaf(Leaf) ->
-            set_leaf(Tab, Path, Name, Val);
+        #{node_type := container} = Schema ->
+            import_nodes(Tab, FullPath, maybe_codec_import(Schema, Val));
+        #{node_type := list, key_names := KeyNames} = Schema ->
+            import_list(Tab, FullPath, KeyNames, maybe_codec_import(Schema, Val));
+        #{node_type := Leaf} = Schema when ?is_leaf(Leaf) ->
+            set_leaf(Tab, Path, Name, maybe_codec_import(Schema, Val));
         false ->
             throw({import_error, {unknown_path, FullPath}})
     end;

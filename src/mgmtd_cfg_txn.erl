@@ -68,11 +68,33 @@ get(#cfg_txn{ets_copy = Copy}, Path) ->
 
 %% Operational mode (no config txn) reads committed config from the
 %% backend. There is no named ETS table `cfg` — that was leftover from
-%% an earlier ETS-only store.
+%% an earlier ETS-only store. Operational-data paths (`config = false`
+%% with a host `data_callback`) are filled from the provider instead.
 get_tree(undefined, Path) ->
-    get_tree_from(permanent, Path);
+    case operational_tree(Path) of
+        {ok, Tree} ->
+            Tree;
+        false ->
+            get_tree_from(permanent, Path)
+    end;
 get_tree(#cfg_txn{ets_copy = Copy}, Path) ->
     get_tree_from({ets, Copy}, Path).
+
+operational_tree([]) ->
+    false;
+operational_tree(Path) ->
+    Key = mgmtd_cfg_db:schema_path_to_key(Path),
+    case mgmtd_schema:lookup(Key) of
+        #{config := false} ->
+            case mgmtd_provider:get_tree(Key) of
+                {ok, Tree} ->
+                    {ok, Tree};
+                {error, _} ->
+                    {ok, []}
+            end;
+        _ ->
+            false
+    end.
 
 get_tree_from(Db, Path) ->
     ?DBG("Path = ~p~n",[Path]),

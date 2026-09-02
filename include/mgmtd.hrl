@@ -45,6 +45,7 @@
         name :: string(),
         desc = "" :: string(),
         config = false :: boolean(),
+        data_callback :: atom(),
         children = fun() -> [] end :: fun(() -> list()),
         opts = [] :: list()
     }).
@@ -56,7 +57,7 @@
         key_names = [] :: [string()],
         min_elements = 0 :: integer(),
         max_elements = unlimited :: unlimited | integer(),
-        data_callback = mgmtd :: atom(),
+        data_callback :: atom(),
         unique = true :: boolean(),
         config = false :: boolean(),
         children = fun() -> [] end :: fun(() -> list()),
@@ -71,6 +72,7 @@
         default,
         mandatory = false :: boolean(),
         config = false :: boolean(),
+        data_callback :: atom(),
         opts = [] :: list()
     }).
 
@@ -82,6 +84,7 @@
         default,
         mandatory = false :: boolean(),
         config = false :: boolean(),
+        data_callback :: atom(),
         min_elements = 0 :: integer(),
         max_elements = unlimited :: unlimited | integer(),
         undefined :: undefined | boolean(),

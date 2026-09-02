@@ -18,6 +18,7 @@
 -export([children/1, children/2, children/3]).
 -export([split_item_path/1, cli_path/2]).
 -export([cast_value/2, cast_list_key_values/1]).
+-export([codec/1, data_callback/1, resolve_data_callback/3]).
 -export([ets_pat/1, ets_tail/1]).
 
 -include("../include/mgmtd.hrl").
@@ -416,7 +417,60 @@ schema_to_map(#schema{path = {Path, Ns}} = S, CmdType) ->
       data_callback => S#schema.data_callback,
       cmd_type => CmdType,
       has_list => S#schema.has_list,
+      opts => S#schema.opts,
       children => fun(ChildPath) -> children(ChildPath, CmdType) end }.
+
+%% @doc Operational-data provider module named as `data_callback` on a
+%% schema node. `undefined` and `mgmtd` mean "not a host provider"
+%% (`mgmtd` is the config-DB list-key callback).
+-spec data_callback(item_path() | map_node()) -> atom() | undefined.
+data_callback(#{data_callback := Mod}) when is_atom(Mod), Mod =/= undefined ->
+    Mod;
+data_callback(#{}) ->
+    undefined;
+data_callback(Path) when is_list(Path) ->
+    case lookup(Path) of
+        #{} = Map ->
+            data_callback(Map);
+        false ->
+            undefined
+    end;
+data_callback(_) ->
+    undefined.
+
+%% @doc Resolve `data_callback` at load time. `undefined` inherits from
+%% the parent. Configuration nodes with no provider keep `mgmtd` so ecli
+%% list-key completion still hits the config DB.
+-spec resolve_data_callback(atom() | undefined, atom() | undefined, boolean()) ->
+          atom() | undefined.
+resolve_data_callback(undefined, undefined, true) ->
+    mgmtd;
+resolve_data_callback(undefined, undefined, false) ->
+    undefined;
+resolve_data_callback(undefined, Parent, Config) ->
+    resolve_data_callback(Parent, undefined, Config);
+resolve_data_callback(NodeCb, _Parent, _Config) ->
+    NodeCb.
+
+%% @doc Persistence codec module named in schema `opts` as `{codec, Mod}`.
+%% Used by the sys.config backend as a term adapter at that node.
+-spec codec(item_path() | map_node()) -> atom() | undefined.
+codec(#{opts := Opts}) when is_list(Opts) ->
+    case lists:keyfind(codec, 1, Opts) of
+        {codec, Mod} when is_atom(Mod) ->
+            Mod;
+        _ ->
+            undefined
+    end;
+codec(Path) when is_list(Path) ->
+    case lookup(Path) of
+        #{} = Map ->
+            codec(Map);
+        false ->
+            undefined
+    end;
+codec(_) ->
+    undefined.
 
 %% @doc Validate Item against the schema stored at Path.
 %% The item must be a value of a leaf or leaf-list

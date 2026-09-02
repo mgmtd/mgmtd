@@ -47,12 +47,14 @@ load_json_property(#{<<"type">> := <<"object">>} = Object,
                    Ns,
                    #{config := Config} = Opts) ->
     %% A container
+    Callback = json_callback(Opts, Config),
     Container =
         #schema{path = {lists:reverse(Path), Ns},
                 prefix = Ns,
                 node_type = container,
                 name = Key,
                 desc = json_desc(Object),
+                data_callback = Callback,
                 config = Config},
     %% io:format(user, "O - ~p~n", [lists:reverse(Path)]),
     true = ets:insert_new(mgmtd_commands, Container),
@@ -70,6 +72,7 @@ load_json_property(#{<<"type">> := <<"array">>} = Object,
             Type = json_item_type(Item),
             Default = json_default(Type, Item),
 
+            Callback = json_callback(Opts, Config),
             LeafList =
                 #schema{path = {lists:reverse(Path), Ns},
                         prefix = Ns,
@@ -80,7 +83,7 @@ load_json_property(#{<<"type">> := <<"array">>} = Object,
                         default = Default,
                         min_elements = maps:get(<<"minItems">>, Object, 0),
                         max_elements = maps:get(<<"maxItems">>, Object, unlimited),
-                        data_callback = maps:get(callback, Opts, mgmtd),
+                        data_callback = Callback,
                         mandatory = true,
                         config = Config
                        },
@@ -107,6 +110,7 @@ load_json_property(#{<<"type">> := <<"array">>} = Object,
                         []
                 end,
 
+            Callback = json_callback(Opts, Config),
             List =
                 #schema{path = {lists:reverse(Path), Ns},
                         prefix = Ns,
@@ -118,16 +122,17 @@ load_json_property(#{<<"type">> := <<"array">>} = Object,
                         max_elements = maps:get(<<"maxItems">>, Object, unlimited),
                         mandatory = false,
                         has_list = true,
-                        data_callback = maps:get(callback, Opts, mgmtd),
+                        data_callback = Callback,
                         config = Config},
             true = ets:insert_new(mgmtd_commands, List),
             ok = mgmtd_schema:mark_has_list_descendent(Ns, tl(Path)),
             Items = maps:get(<<"items">>, Object),
             load_json_properties(maps:get(<<"properties">>, Items), Path, Ns, Opts)
     end;
-load_json_property(#{} = Item, Key, Path, Ns, #{config := Config}) ->
+load_json_property(#{} = Item, Key, Path, Ns, #{config := Config} = Opts) ->
     Type = json_item_type(Item),
     Default = json_default(Type, Item),
+    Callback = json_callback(Opts, Config),
     Leaf =
         #schema{path = {lists:reverse(Path), Ns},
                 prefix = Ns,
@@ -137,6 +142,7 @@ load_json_property(#{} = Item, Key, Path, Ns, #{config := Config}) ->
                 desc = json_desc(Item),
                 default = Default,
                 mandatory = true,
+                data_callback = Callback,
                 config = Config},
                                                 %io:format(user, "L - ~p~n", [lists:reverse(Path)]),
     true = ets:insert_new(mgmtd_commands, Leaf).
@@ -146,15 +152,20 @@ ensure_prefix_container(?DEFAULT_NS, _Opts) ->
 ensure_prefix_container(Prefix, Opts) ->
     Name = atom_to_list(Prefix),
     Config = maps:get(config, Opts, false),
+    Callback = maps:get(callback, Opts, undefined),
     case ets:lookup(mgmtd_commands, {[Name], Prefix}) of
         [] ->
             mgmtd_schema_function:load_node(
               mgmtd_schema:prefix_container(Prefix, []),
-              [], Prefix, Config);
+              [], Prefix, Config, Callback);
         [_] ->
             ok
     end,
     [Name].
+
+json_callback(Opts, Config) ->
+    mgmtd_schema:resolve_data_callback(maps:get(callback, Opts, undefined),
+                                       undefined, Config).
 
 %% When no index is provided by the schema insert an integer based
 %% one with name index

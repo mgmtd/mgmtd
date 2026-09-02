@@ -38,16 +38,14 @@ start() ->
 %% in separate files and load them independently with the
 %% appropriate option.
 %%
-%% For operational data it is required to provide the name of a
-%% module that exports the mgmtd_provider behaviour functions:
-%%
-%% get_value(Path) -> {ok, Value} | {error, Reason}
-%% get_first(Path) -> {ok, ListKey} | {error, Reason}
-%% get_next(Path, ListKey) -> {ok, ListKey} | {error, Reason}
+%% For operational data provide a module that implements the
+%% `mgmtd_provider` behaviour (`get_value` / `get_first` / `get_next`).
+%% Set it as `data_callback` on the function-schema node (inherited by
+%% descendants) or as `callback => Module` at JSON load time.
 %%
 %% Options:
 %% config => true | false (default false)
-%% callback => Module::atom()
+%% callback => Module::atom()    %% operational-data provider (mgmtd_provider)
 %% namespace => Prefix::atom()   %% CLI / sys.config identity; default is 'default'
 %% prefix => Prefix::atom()      %% optional; if omitted, namespace is the prefix
 %%                               %% For YANG later: namespace is a URI string and
@@ -138,9 +136,25 @@ txn_commit(Txn) ->
     mgmtd_cfg_server:commit(Txn).
 
 %% Built in set of data_callback API callbacks when using the
-%% built in configuration database.
+%% built in configuration database. Operational lists are served by
+%% the schema `data_callback` module (`get_first` / `get_next`).
 list_keys(Txn, ListItemPath, ListKeyMatch) ->
-    mgmtd_cfg_txn:list_keys(Txn, ListItemPath, ListKeyMatch).
+    case mgmtd_provider:mod(ListItemPath) of
+        undefined ->
+            case mgmtd_schema:lookup(ListItemPath) of
+                #{config := false} ->
+                    [];
+                _ ->
+                    mgmtd_cfg_txn:list_keys(Txn, ListItemPath, ListKeyMatch)
+            end;
+        Mod ->
+            case mgmtd_provider:list_keys(Mod, ListItemPath, ListKeyMatch) of
+                {ok, Keys} ->
+                    Keys;
+                {error, _} ->
+                    []
+            end
+    end.
 
 %% @doc Subscribe to configuration change messages.
 %% Config change messages will be sent to Pid.
@@ -161,18 +175,19 @@ schema_children(Ns, Path, CmdType) ->
     mgmtd_schema:children(Ns, Path, CmdType).
 
 %% Lookup API
-%% @doc read current config at path at a single level outside of a
-%% transaction. For a leaf this will be the configured value of the
-%% leaf or its default if provided in the schema. For a list item this
-%% will be the list of list keys, for a container item or full path to
-%% a list item this will be a list of child nodes.
+%% @doc Read the current value at path, outside a transaction.
+%% Configuration leaves come from the config DB (or the schema default).
+%% Operational leaves (`config = false`) are read from the node's
+%% `data_callback` module (`mgmtd_provider:get_value/1`).
+%% A list path returns the list keys; a container or a full path to a
+%% list item returns the names of the child nodes.
 
--spec lookup(item_path()) -> {ok, any()} | {error, unknown_schema_path}.
+-spec lookup(item_path()) -> {ok, any()} | {error, term()}.
 lookup(Path) ->
     {Ns, Local} = mgmtd_schema:split_item_path(Path),
     lookup_at(Ns, Local, Path).
 
--spec lookup(ns(), item_path()) -> {ok, any()} | {error, unknown_schema_path}.
+-spec lookup(ns(), item_path()) -> {ok, any()} | {error, term()}.
 lookup(Ns, Path) ->
     lookup_at(Ns, Path, mgmtd_schema:cli_path(Ns, Path)).
 
@@ -182,30 +197,64 @@ lookup_at(Ns, Local, DbPath) ->
     case mgmtd_schema:lookup(Ns, SchemaPath) of
         false ->
             {error, unknown_schema_path};
-        #{node_type := list, key_names := Keys} ->
-            case lists:last(DbPath) of
-                ListKey when is_tuple(ListKey) ->
-                    %% It's a full path to a list entry, return the
-                    %% names of the children of the list key
-                    Cs = mgmtd_schema:children(Ns, SchemaPath, show),
-                    {ok, lists:map(fun(#{name := Name}) -> Name end, Cs)};
-                _ ->
-                    %% User looked up the list itself, return the list keys
-                    _Pattern = erlang:make_tuple(length(Keys), '_'),
-                    {ok, mgmtd_cfg_db:list_keys(DbPath)}
-            end;
-        #{node_type := container} ->
+        Schema ->
+            lookup_schema(Ns, SchemaPath, DbPath, Schema)
+    end.
+
+lookup_schema(Ns, SchemaPath, DbPath, #{node_type := list} = Schema) ->
+    case lists:last(DbPath) of
+        ListKey when is_tuple(ListKey) ->
+            %% Full path to a list entry: names of the children
             Cs = mgmtd_schema:children(Ns, SchemaPath, show),
             {ok, lists:map(fun(#{name := Name}) -> Name end, Cs)};
-        #{node_type := Leaf, default := Default} when Leaf == leaf;
-                                                      Leaf == leaf_list ->
-            case mgmtd_cfg_db:lookup(DbPath) of
-                [#cfg{value = Value}] ->
-                    {ok, Value};
-                [] when Default == undefined ->
+        _ ->
+            lookup_list_keys(DbPath, Schema)
+    end;
+lookup_schema(Ns, SchemaPath, _DbPath, #{node_type := container}) ->
+    Cs = mgmtd_schema:children(Ns, SchemaPath, show),
+    {ok, lists:map(fun(#{name := Name}) -> Name end, Cs)};
+lookup_schema(_Ns, _SchemaPath, DbPath, #{node_type := Leaf} = Schema)
+  when Leaf == leaf; Leaf == leaf_list ->
+    lookup_leaf(DbPath, Schema).
+
+lookup_list_keys(DbPath, Schema) ->
+    case mgmtd_provider:mod(Schema) of
+        undefined ->
+            case Schema of
+                #{config := false} ->
+                    {error, no_data_callback};
+                _ ->
+                    {ok, mgmtd_cfg_db:list_keys(DbPath)}
+            end;
+        Mod ->
+            mgmtd_provider:list_keys(Mod, DbPath, '$1')
+    end.
+
+lookup_leaf(DbPath, Schema) ->
+    Default = maps:get(default, Schema, undefined),
+    case mgmtd_provider:mod(Schema) of
+        undefined ->
+            case Schema of
+                #{config := false} ->
+                    {error, no_data_callback};
+                _ ->
+                    case mgmtd_cfg_db:lookup(DbPath) of
+                        [#cfg{value = Value}] ->
+                            {ok, Value};
+                        [] when Default == undefined ->
+                            {ok, undefined};
+                        [] ->
+                            {ok, Default}
+                    end
+            end;
+        _Mod ->
+            case mgmtd_provider:fetch(DbPath) of
+                {ok, not_found} when Default == undefined ->
                     {ok, undefined};
-                [] ->
-                    {ok, Default}
+                {ok, not_found} ->
+                    {ok, Default};
+                Other ->
+                    Other
             end
     end.
 

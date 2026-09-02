@@ -44,7 +44,8 @@
          pattern :: undefined | string(),
          mandatory = false :: boolean(),
          has_list = false :: boolean(),
-         config = false :: boolean()}).
+         config = false :: boolean(),
+         opts = [] :: list()}).
 
 -type map_node() :: #{role := schema,
                       path := schema_path(),
@@ -65,6 +66,7 @@
                       data_callback => atom(),
                       cmd_type => cmd_type(),
                       has_list => boolean(),
+                      opts => list(),
                       children => function() }.
 
 -type full_schema_path() :: [#schema{}].
