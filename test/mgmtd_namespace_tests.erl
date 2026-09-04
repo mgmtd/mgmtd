@@ -72,7 +72,7 @@ prefixed_lookup_path_includes_prefix_container() ->
 subscribe_prefixed_list() ->
     {ok, Ref} = mgmtd:subscribe(["example", "server", "servers"], self()),
     receive
-        {updated_config, Ref, Updated} ->
+        {config_change, Ref, Updated} ->
             ?assertEqual([], Updated)
     after 1000 ->
             error(init_subscription_not_received)
@@ -83,8 +83,11 @@ subscribe_prefixed_list() ->
     {ok, Txn2} = mgmtd:txn_set(Txn, SchemaPath),
     {ok, _} = mgmtd:txn_commit(Txn2),
     receive
-        {updated_config, Ref, Updated1} ->
-            ?assertEqual([{"n1"}], Updated1)
+        {config_change, Ref, Updated1} ->
+            ?assertEqual([{add, ["example", "server", "servers"], {"n1"}},
+                          {set, ["example", "server", "servers", {"n1"}, "name"], "n1"},
+                          {set, ["example", "server", "servers", {"n1"}, "port"], 81}],
+                         Updated1)
     after 1000 ->
             error(subscription_not_received)
     end.

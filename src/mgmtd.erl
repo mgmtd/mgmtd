@@ -157,13 +157,24 @@ list_keys(Txn, ListItemPath, ListKeyMatch) ->
     end.
 
 %% @doc Subscribe to configuration change messages.
-%% Config change messages will be sent to Pid.
-%% Change messages are of the form:
-%% {config_change, Path, Value}
-%% where Value is the new list of list keys, a leaf value, or the complete tree
-%% below a container
+%%
+%% An initial snapshot is sent immediately, then a message after each
+%% successful commit that changes anything in the subscribed subtree:
+%%
+%%     {config_change, Ref, Ops}
+%%
+%% `Ops` is a list of changes to apply, deletes first, then adds, then
+%% leaf values:
+%%
+%%     {delete, ListPath, ListKey}
+%%     {add,    ListPath, ListKey}
+%%     {set,    Path,     Value}
+%%
+%% A container or list path includes every change under it. A path that
+%% names a list instance only includes that instance. A leaf path that
+%% omits the list instance (e.g. `["server", "servers", "port"]`)
+%% matches that leaf in every list item.
 subscribe(Path, Pid) ->
-    %% io:format(user, "Subscrive called ~p~n", [ets:tab2list(cfg)]),
     mgmtd_cfg_server:subscribe(Path, Pid).
 
 %% @doc get the list of child nodes in the schema at path

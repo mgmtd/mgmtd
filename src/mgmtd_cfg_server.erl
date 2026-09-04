@@ -109,16 +109,16 @@ init([]) ->
           {stop, Reason :: term(), Reply :: term(), NewState :: #state{}} |
           {stop, Reason :: term(), NewState :: #state{}}.
 handle_call({subscribe, Path, Pid}, _From, State) when is_pid(Pid) ->
-    try initial_subscription_message(Path) of
+    try initial_subscription_ops(Path) of
         {error, _Reason} = Err ->
             {reply, Err, State};
-        {ok, Config} ->
+        {ok, Ops} ->
             Ref = erlang:make_ref(),
             MonRef = erlang:monitor(process, Pid),
             ets:insert(State#state.subs, {{Path, Pid, Ref}, []}),
             ets:insert(State#state.sub_refs, {Ref, {Path, Pid, MonRef}}),
             ets:insert(State#state.sub_pids, {Pid, {Path, Ref}}),
-            Pid ! {updated_config, Ref, Config},
+            Pid ! {config_change, Ref, Ops},
             {reply, {ok, Ref}, State}
     catch
         error:db_not_initialized ->
@@ -250,124 +250,229 @@ format_status(_Opt, Status) ->
 %%% Internal functions
 %%%===================================================================
 
-
-%% Provide an initial value for a subscription based on committed config
-initial_subscription_message(Path) ->
-    %% io:format(user, "Initial Looking up path ~p~n", [mgmtd_schema:lookup(Path)]),
-    case mgmtd_schema:lookup(Path) of
-        #{node_type := list} ->
-            case lists:last(Path) of
-                Last when is_tuple(Last) ->
-                    case container_values(Path) of
-                        false ->
-                            {error, no_values};
-                        Vals ->
-                            {ok, Vals}
-                    end;
-                _ ->
-                    %% io:format(user, "Initial  ~p~n", [mgmtd_cfg_db:list_keys(Path)]),
-                    {ok, mgmtd_cfg_db:list_keys(Path)}
-            end;
-        #{node_type := container} ->
-            case container_values(Path) of
-                false ->
-                    {error, no_values};
-                Vals ->
-                    {ok, Vals}
-            end;
-        #{node_type := Leaf, name := N} when Leaf == leaf; Leaf == leaf_list ->
-            case leaf_value(Path) of
-                {ok, Val} ->
-                    {ok, [{N, Val}]};
-                false ->
-                    {error, no_value}
-            end;
-        false ->
-            {error, unknown_schema_path}
+%% Snapshot as if going from empty → committed config.
+initial_subscription_ops(Path) ->
+    case validate_sub_path(Path) of
+        {error, _} = Err ->
+            Err;
+        ok ->
+            {ok, subscription_ops(Path, empty, committed)}
     end.
 
 %% Subscription messages on transaction commit
 subscription_messages(Subscriptions, Txn) ->
     lists:foldl(fun({Path, Pid, Ref}, Acc) ->
-                        case subscription_message(Path, Txn) of
-                            false ->
+                        case subscription_ops(Path, committed, {txn, Txn}) of
+                            [] ->
                                 Acc;
-                            Msg ->
-                                [{Pid, {updated_config, Ref, Msg}} | Acc]
+                            Ops ->
+                                [{Pid, {config_change, Ref, Ops}} | Acc]
                         end
                 end, [], Subscriptions).
-
-%% Given the subscribed path ["path", "to", "elem"] and
-%% a Txn containing operations as Schema path as a list of #schema maps
-subscription_message(Path, Txn) ->
-    case mgmtd_schema:lookup(Path) of
-        #{node_type := list} ->
-            case lists:last(Path) of
-                Last when is_tuple(Last) ->
-                    container_values(Path, Txn);
-                _ ->
-                    New = mgmtd_cfg_txn:list_keys(Txn, Path, '$1'),
-                    Existing = mgmtd_cfg_db:list_keys(Path),
-                    if New == Existing ->
-                            false;
-                       true ->
-                            New
-                    end
-            end;
-        #{node_type := container} ->
-            container_values(Path, Txn);
-        #{node_type := Leaf, name := N} when Leaf == leaf; Leaf == leaf_list ->
-            [{N, leaf_value(Path, Txn)}]
-    end.
-
-container_values(Path) ->
-    container_values(Path, undefined).
-
-container_values(Path, Txn) ->
-    Children = mgmtd_schema:children(Path),
-    LeafChildren = lists:filter(fun(#{node_type := Leaf}) ->
-                                        Leaf == leaf orelse Leaf == leaf_list
-                                end, Children),
-    CVs = lists:foldl(fun(#{name := N}, Acc) ->
-                              case leaf_value(Path ++ [N], Txn) of
-                                  {ok, Val} ->
-                                      [{N, Val} | Acc];
-                                  false ->
-                                      Acc
-                              end
-                      end, [], LeafChildren),
-    case CVs of
-        [] ->
-            false;
-        _ ->
-            lists:reverse(CVs)
-    end.
-
-leaf_value(Path) ->
-    leaf_value(Path, undefined).
-
-leaf_value(Path, undefined) ->
-    case mgmtd_cfg_db:lookup(Path) of
-        [#cfg{value = Val}] ->
-            {ok, Val};
-        [] ->
-            false
-    end;
-leaf_value(Path, Txn) ->
-    {ok, New} = mgmtd_cfg_txn:get(Txn, Path),
-    Old = case mgmtd_cfg_db:lookup(Path) of
-              [#cfg{value = Val}] ->
-                  Val;
-              [] ->
-                  undefined
-          end,
-    if New =/= Old ->
-            {ok, New};
-       true ->
-            false
-    end.
 
 send_subscription_messages(Messages) ->
     lists:foreach(fun({Pid, Msg}) ->
                           Pid ! Msg
                   end, Messages).
+
+validate_sub_path(Path) ->
+    case mgmtd_schema:lookup(Path) of
+        false ->
+            {error, unknown_schema_path};
+        #{} ->
+            case bad_list_keys(Path, []) of
+                true ->
+                    {error, unknown_schema_path};
+                false ->
+                    ok
+            end
+    end.
+
+bad_list_keys([], _Acc) ->
+    false;
+bad_list_keys([Key | Rest], Acc) when is_tuple(Key) ->
+    case mgmtd_schema:lookup(lists:reverse(Acc)) of
+        #{node_type := list} ->
+            bad_list_keys(Rest, [Key | Acc]);
+        _ ->
+            true
+    end;
+bad_list_keys([Name | Rest], Acc) ->
+    bad_list_keys(Rest, [Name | Acc]).
+
+%% Longest stored prefix we need to read. Stop at a list when the
+%% instance is omitted (match every item). Stop at the list item when
+%% a key is given so add/delete of that instance is visible.
+db_prefix(Path) ->
+    db_prefix(Path, []).
+
+db_prefix([], Acc) ->
+    lists:reverse(Acc);
+db_prefix([Key | Rest], Acc) when is_tuple(Key) ->
+    db_prefix(Rest, [Key | Acc]);
+db_prefix([Name | Rest], Acc) ->
+    Next = lists:reverse([Name | Acc]),
+    case mgmtd_schema:lookup(Next) of
+        #{node_type := list} ->
+            case Rest of
+                [Key | _] when is_tuple(Key) ->
+                    lists:reverse([Key, Name | Acc]);
+                _ ->
+                    Next
+            end;
+        _ ->
+            db_prefix(Rest, [Name | Acc])
+    end.
+
+subscription_ops(SubPath, OldSrc, NewSrc) ->
+    Prefix = db_prefix(SubPath),
+    OldMap = index_rows(rows_at(Prefix, OldSrc)),
+    NewMap = index_rows(rows_at(Prefix, NewSrc)),
+    order_ops(diff_ops(SubPath, OldMap, NewMap)).
+
+rows_at(_Prefix, empty) ->
+    [];
+rows_at(Prefix, committed) ->
+    mgmtd_cfg_db:match_object(row_pattern(Prefix));
+rows_at(Prefix, {txn, Txn}) ->
+    mgmtd_cfg_txn:match_object(Txn, row_pattern(Prefix)).
+
+row_pattern(Prefix) ->
+    #cfg{path = mgmtd_schema:ets_tail(Prefix),
+         _ = mgmtd_schema:ets_pat('_')}.
+
+index_rows(Rows) ->
+    maps:from_list([{Path, {NodeType, Value}}
+                    || #cfg{path = Path, node_type = NodeType, value = Value} <- Rows]).
+
+diff_ops(SubPath, OldMap, NewMap) ->
+    OldPaths = maps:keys(OldMap),
+    NewPaths = maps:keys(NewMap),
+    Deleted = OldPaths -- NewPaths,
+    Created = NewPaths -- OldPaths,
+    Shared = NewPaths -- Created,
+    DelOps = lists:filtermap(
+               fun(P) ->
+                       case maps:get(P, OldMap) of
+                           {list_key, _} ->
+                               keep_if(SubPath, {delete, lists:droplast(P), lists:last(P)});
+                           {Leaf, OldV} when Leaf =:= leaf; Leaf =:= leaf_list ->
+                               %% Delete+re-add of the same list item is
+                               %% squashed: the instance stays, so a vanished
+                               %% leaf is a set back to default (or undefined).
+                               Parent = lists:droplast(P),
+                               case maps:is_key(Parent, NewMap) of
+                                   true ->
+                                       NewV = leaf_default(P),
+                                       case NewV =:= OldV of
+                                           true ->
+                                               false;
+                                           false ->
+                                               keep_if(SubPath, {set, P, NewV})
+                                       end;
+                                   false ->
+                                       false
+                               end;
+                           _ ->
+                               false
+                       end
+               end, Deleted),
+    AddOps = lists:filtermap(
+               fun(P) ->
+                       case maps:get(P, NewMap) of
+                           {list_key, _} ->
+                               keep_if(SubPath, {add, lists:droplast(P), lists:last(P)});
+                           {Leaf, Val} when Leaf =:= leaf; Leaf =:= leaf_list ->
+                               keep_if(SubPath, {set, P, Val});
+                           _ ->
+                               false
+                       end
+               end, Created),
+    SetOps = lists:filtermap(
+               fun(P) ->
+                       case {maps:get(P, OldMap), maps:get(P, NewMap)} of
+                           {{Leaf, OldV}, {Leaf, NewV}}
+                             when (Leaf =:= leaf orelse Leaf =:= leaf_list),
+                                  OldV =/= NewV ->
+                               keep_if(SubPath, {set, P, NewV});
+                           _ ->
+                               false
+                       end
+               end, Shared),
+    DelOps ++ AddOps ++ SetOps.
+
+keep_if(SubPath, Op) ->
+    case op_matches(SubPath, Op) of
+        true -> {true, Op};
+        false -> false
+    end.
+
+leaf_default(Path) ->
+    case mgmtd_schema:get_default(Path) of
+        {ok, Default} ->
+            Default;
+        _ ->
+            undefined
+    end.
+
+op_matches(SubPath, {set, Path, _Value}) ->
+    case path_rel(SubPath, Path) of
+        equal -> true;
+        subtree -> true;
+        _ -> false
+    end;
+op_matches(SubPath, {add, ListPath, Key}) ->
+    path_rel(SubPath, ListPath ++ [Key]) =/= mismatch;
+op_matches(SubPath, {delete, ListPath, Key}) ->
+    path_rel(SubPath, ListPath ++ [Key]) =/= mismatch.
+
+%% Walk subscription path vs a stored data path. List keys in the data
+%% may be omitted from the subscription (match every instance).
+path_rel([], []) ->
+    equal;
+path_rel([], _Data) ->
+    subtree;
+path_rel(_Sub, []) ->
+    ancestor;
+path_rel([S | Ss], [D | Ds]) when S =:= D ->
+    path_rel(Ss, Ds);
+path_rel([S | _Ss], [D | _Ds]) when is_tuple(S), is_tuple(D) ->
+    mismatch;
+path_rel(Sub, [D | Ds]) when is_tuple(D) ->
+    path_rel(Sub, Ds);
+path_rel(_Sub, _Data) ->
+    mismatch.
+
+order_ops(Ops) ->
+    {Deletes, Rest} = lists:partition(fun is_delete/1, Ops),
+    {Adds, Sets} = lists:partition(fun is_add/1, Rest),
+    sort_deletes(Deletes) ++ sort_adds(Adds) ++ sort_sets(Sets).
+
+is_delete({delete, _, _}) -> true;
+is_delete(_) -> false.
+
+is_add({add, _, _}) -> true;
+is_add(_) -> false.
+
+sort_deletes(Deletes) ->
+    lists:sort(fun({delete, P1, K1}, {delete, P2, K2}) ->
+                       L1 = length(P1),
+                       L2 = length(P2),
+                       if L1 =:= L2 -> {P1, K1} =< {P2, K2};
+                          true -> L1 > L2
+                       end
+               end, Deletes).
+
+sort_adds(Adds) ->
+    lists:sort(fun({add, P1, K1}, {add, P2, K2}) ->
+                       L1 = length(P1),
+                       L2 = length(P2),
+                       if L1 =:= L2 -> {P1, K1} =< {P2, K2};
+                          true -> L1 < L2
+                       end
+               end, Adds).
+
+sort_sets(Sets) ->
+    lists:sort(fun({set, P1, _}, {set, P2, _}) ->
+                       P1 =< P2
+               end, Sets).

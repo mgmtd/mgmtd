@@ -22,7 +22,8 @@
 
 -export_type([txn/0]).
 
--export([new/0, exit_txn/1, get/2, get_tree/2, set/3, delete/2, list_keys/3, commit/1]).
+-export([new/0, exit_txn/1, get/2, get_tree/2, set/3, delete/2, list_keys/3,
+         match_object/2, commit/1]).
 
 new() ->
     TxnId = erlang:unique_integer(),
@@ -34,14 +35,16 @@ exit_txn(#cfg_txn{ets_copy = EtsCopy}) ->
     catch ets:delete(EtsCopy),
     ok.
 
-%% @doc commit the operations stored up in the configuration transaction
+%% @doc commit the operations stored up in the configuration transaction.
+%% Ops are recorded newest-first; apply oldest-first so a delete then
+%% re-add of the same list item in one session lands as the re-add.
 commit(#cfg_txn{ops = Ops} = Txn) ->
     Fun = fun() ->
                   lists:foreach(fun({set, Path, Value}) ->
                                         mgmtd_cfg_db:insert_path_items(permanent, Path, Value);
                                    ({delete, Path}) ->
                                         mgmtd_cfg_db:delete_path_items(permanent, Path)
-                                end, Ops)
+                                end, lists:reverse(Ops))
           end,
     case mgmtd_cfg_db:transaction(Fun) of
         ok ->
@@ -155,6 +158,10 @@ list_keys(undefined, Path, Pattern) ->
     mgmtd_cfg_db:list_keys(Path, Pattern);
 list_keys(#cfg_txn{ets_copy = Copy}, Path, Pattern) ->
     mgmtd_cfg_db:list_keys({ets, Copy}, Path, Pattern).
+
+-spec match_object(#cfg_txn{}, term()) -> [#cfg{}].
+match_object(#cfg_txn{ets_copy = Copy}, Pattern) ->
+    mgmtd_cfg_db:match_object({ets, Copy}, Pattern).
 
 
 

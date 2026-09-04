@@ -45,7 +45,8 @@ list_item_test_() ->
       fun create_second_list_item_keys_only/0,
       fun create_list_item_keys_only_idempotent/0,
       fun create_list_item_keys_only_invalid_keys/0,
-      fun show_committed_without_txn/0
+      fun show_committed_without_txn/0,
+      fun delete_then_readd_same_key_in_one_txn/0
      ]}.
 
 create_and_delete_list_item() ->
@@ -239,6 +240,23 @@ show_committed_without_txn() ->
     ?assertMatch([{"servers", _}], Subtree),
 
     {ok, _} = txn_delete_commit(Txn2, ["server", "servers", {"web1"}]).
+
+%% Delete a list item then create it again with different leaves in the
+%% same session. Commit must keep the re-add, not replay newest-first
+%% (set then delete) and drop it.
+delete_then_readd_same_key_in_one_txn() ->
+    Key = {"web1"},
+    Item = ["server", "servers", Key],
+    {ok, Txn} = txn_set(mgmtd:txn_new(), Item ++ ["port", "81"]),
+    {ok, Txn2} = mgmtd:txn_commit(Txn),
+    ?assertEqual({ok, 81}, mgmtd:lookup(Item ++ ["port"])),
+
+    {ok, Txn3} = txn_delete(Txn2, Item),
+    {ok, Txn4} = txn_set(Txn3, Item ++ ["port", "9999"]),
+    {ok, _} = mgmtd:txn_commit(Txn4),
+    ?assertEqual({ok, [Key]}, mgmtd:lookup(["server", "servers"])),
+    ?assertEqual({ok, 9999}, mgmtd:lookup(Item ++ ["port"])),
+    ?assertEqual({ok, "127.0.0.1"}, mgmtd:lookup(Item ++ ["host"])).
 
 txn_set(Txn, Path) ->
     {ok, SchemaPath} = mgmtd_schema:lookup_path(Path),
