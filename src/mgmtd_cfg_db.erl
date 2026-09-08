@@ -467,7 +467,9 @@ simplify_tree([#cfg{node_type = list, name = Name, value = Children} |Ts]) ->
     [{Name, simplify_tree(Children)}|simplify_tree(Ts)];
 simplify_tree([#cfg{node_type = list_key, name = Name, value = Children} |Ts]) ->
     [{Name, simplify_tree(Children)}|simplify_tree(Ts)];
-simplify_tree([#cfg{name = Name, value = Value} | Cfgs]) ->
+simplify_tree([#cfg{node_type = leaf_list, name = Name, value = Value} | Cfgs]) ->
+    [{Name, {leaf_list, Value}}|simplify_tree(Cfgs)];
+simplify_tree([#cfg{node_type = leaf, name = Name, value = Value} | Cfgs]) ->
     [{Name, {value, Value}}|simplify_tree(Cfgs)];
 simplify_tree([]) ->
     [].

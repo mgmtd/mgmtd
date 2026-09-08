@@ -339,5 +339,5 @@ Next up
  - get enum values working for all schema types
  - get the rest of the yang datatypes working
  - add yang schema support
- - add sys.config style database where prefix maps to application name
  - add pipe commands
+ - schema upgrades and downgrades. store schema that current store relies on? or simply apply to database.

@@ -169,7 +169,7 @@ show_operational_tree() ->
     {ok, Tree} = mgmtd:txn_show(undefined, Path),
     Status = proplists:get_value("status", Tree),
     ?assertEqual({value, "1d4h"}, proplists:get_value("uptime", Status)),
-    ?assertEqual({value, ["core", "edge"]}, proplists:get_value("tags", Status)),
+    ?assertEqual({leaf_list, ["core", "edge"]}, proplists:get_value("tags", Status)),
     Ifaces = proplists:get_value("interfaces", Status),
     Eth0 = proplists:get_value({"eth0"}, Ifaces),
     ?assertEqual({value, "eth0"}, proplists:get_value("name", Eth0)),

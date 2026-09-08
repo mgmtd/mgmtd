@@ -109,7 +109,8 @@ list_keys(Mod, Path, Match) ->
     end.
 
 %% @doc Nested tree for `show` of an operational path. Same shape as
-%% `mgmtd_cfg_db:simplify_tree/1`: `[{Name, Children} | {Name, {value, V}}]`.
+%% `mgmtd_cfg_db:simplify_tree/1`:
+%% `[{Name, Children} | {Name, {value, V}} | {Name, {leaf_list, [V]}}]`.
 -spec get_tree(item_path()) -> {ok, list()} | {error, term()}.
 get_tree(Path) ->
     SchemaPath = schema_path(Path),
@@ -259,16 +260,20 @@ tree_at(Path, #{node_type := list, name := Name}) ->
     end.
 
 tree_leaf(Path, Name, Schema) ->
+    Tag = case Schema of
+              #{node_type := leaf_list} -> leaf_list;
+              _ -> value
+          end,
     case fetch(Path) of
         {ok, not_found} ->
             case Schema of
                 #{default := Default} when Default =/= undefined ->
-                    {ok, [{Name, {value, Default}}]};
+                    {ok, [{Name, {Tag, Default}}]};
                 _ ->
                     {ok, []}
             end;
         {ok, Value} ->
-            {ok, [{Name, {value, Value}}]};
+            {ok, [{Name, {Tag, Value}}]};
         {error, _} = Err ->
             Err
     end.
