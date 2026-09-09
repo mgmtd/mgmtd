@@ -1,0 +1,16 @@
+module example-circular-uses {
+  namespace "urn:example:circ";
+  prefix c;
+
+  grouping a {
+    uses b;
+  }
+
+  grouping b {
+    uses a;
+  }
+
+  container x {
+    uses a;
+  }
+}

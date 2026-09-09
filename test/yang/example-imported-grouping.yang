@@ -1,0 +1,10 @@
+module example-imported-grouping {
+  namespace "urn:example:ig";
+  prefix ig;
+
+  grouping keys {
+    leaf name {
+      type string;
+    }
+  }
+}

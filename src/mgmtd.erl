@@ -74,6 +74,14 @@ load_function_schema(Fun, Opts) ->
 %% @doc Load a YANG 1.1 / 1.0 module file.
 %% Prefix defaults to the module `prefix` statement; namespace is the
 %% module URI. Override with `#{prefix => Atom}`.
+%%
+%% Options:
+%%   prefix => atom()
+%%   namespace => URI::string()
+%%   search_path => [Dir]     %% plus the file's directory and priv/yang
+%%   features => all | none | [Name] | #{Module => [Name]}
+%%               default `all` (keep if-feature nodes)
+%%   callback => Module
 load_yang_module(File) ->
     mgmtd_schema:load_yang_schema_file(File, #{}).
 load_yang_module(File, Opts) when is_map(Opts) ->

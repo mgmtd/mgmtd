@@ -1,8 +1,7 @@
 %% Load RFC 7950 YANG modules into mgmtd schema ETS.
 %%
-%% PR 1 subset: self-contained modules (container/list/leaf/leaf-list,
-%% builtin types, range, enumeration, same-module typedefs). import,
-%% grouping/uses, augment, identity, and choice are later slices.
+%% PR 2: import/include, search_path, typedefs across modules,
+%% grouping/uses/refine, if-feature filtering.
 -module(mgmtd_schema_yang).
 
 -export([load_file/1, load_file/2]).
@@ -40,7 +39,7 @@ compile_file(File) ->
 compile_file(File, Opts) ->
     case mgmtd_yang_parse:file(File, scan_opts(Opts)) of
         {ok, Stmts} ->
-            compile(Stmts, Opts);
+            compile(Stmts, Opts#{file => File});
         Error ->
             Error
     end.
@@ -58,24 +57,26 @@ compile([{module, _Ln, Name0, Body}], Opts) ->
         {error, _} = Err ->
             Err;
         {ok, Header} ->
-            PrefixAtom = maps:get(prefix, Opts, maps:get(prefix, Header)),
-            NsUri = case maps:get(namespace, Opts, undefined) of
-                        undefined -> maps:get(namespace, Header);
-                        Override -> Override
-                    end,
-            Typedefs = collect_typedefs(Body),
-            Ctx = #{typedefs => Typedefs,
-                    parent_config => true,
-                    module => Name},
-            case data_nodes(Body, Ctx) of
+            Ctx0 = init_ctx(Opts, Header, Name),
+            case prepare_module(Body, Ctx0) of
                 {error, _} = Err ->
                     Err;
-                {ok, Nodes} ->
-                    {ok, #{module => Name,
-                           prefix => PrefixAtom,
-                           namespace => NsUri,
-                           yang_version => maps:get(yang_version, Header, <<"1">>),
-                           nodes => Nodes}}
+                {ok, Merged, Ctx1} ->
+                    case data_nodes(Merged, Ctx1) of
+                        {error, _} = Err ->
+                            Err;
+                        {ok, Nodes} ->
+                            PrefixAtom = maps:get(prefix, Opts, maps:get(prefix, Header)),
+                            NsUri = case maps:get(namespace, Opts, undefined) of
+                                        undefined -> maps:get(namespace, Header);
+                                        Override -> Override
+                                    end,
+                            {ok, #{module => Name,
+                                   prefix => PrefixAtom,
+                                   namespace => NsUri,
+                                   yang_version => maps:get(yang_version, Header, <<"1">>),
+                                   nodes => Nodes}}
+                    end
             end
     end;
 compile([{submodule, Ln, Name, _Body}], _Opts) ->
@@ -91,6 +92,49 @@ scan_opts(Opts) ->
         Hook -> [{open_hook, Hook}]
     end.
 
+init_ctx(Opts, Header, Name) ->
+    File = maps:get(file, Opts, undefined),
+    #{search_path => search_path(Opts, File),
+      features => normalize_features(maps:get(features, Opts, all)),
+      loaded => #{},
+      file => File,
+      opts => Opts,
+      parent_config => true,
+      uses_stack => [],
+      module => list_to_binary(Name),
+      mod_prefix => maps:get(prefix_bin, Header),
+      typedefs => #{},
+      groupings => #{},
+      imports => #{}}.
+
+search_path(Opts, File) ->
+    FileDir = case File of
+                  undefined -> [];
+                  _ -> [filename:dirname(filename:absname(File))]
+              end,
+    User = maps:get(search_path, Opts, []),
+    FileDir ++ User ++ priv_yang_dirs().
+
+priv_yang_dirs() ->
+    AppDir = case code:priv_dir(mgmtd) of
+                 {error, _} -> [];
+                 Dir -> [filename:join(Dir, "yang")]
+             end,
+    Local = case filelib:is_dir("priv/yang") of
+                true -> ["priv/yang"];
+                false -> []
+            end,
+    uniq_dirs(AppDir ++ Local).
+
+uniq_dirs(Dirs) ->
+    lists:reverse(lists:foldl(
+                    fun(D, Acc) ->
+                            case lists:member(D, Acc) of
+                                true -> Acc;
+                                false -> [D | Acc]
+                            end
+                    end, [], Dirs)).
+
 header(Body) ->
     case {find_arg(namespace, Body), find_arg(prefix, Body)} of
         {undefined, _} ->
@@ -98,13 +142,14 @@ header(Body) ->
         {_, undefined} ->
             {error, missing_prefix};
         {Ns, Prefix0} ->
-            PrefixAtom = prefix_atom(Prefix0),
+            PrefixBin = arg_bin(Prefix0),
             Ver = case find_arg('yang-version', Body) of
                       undefined -> <<"1">>;
                       V -> arg_bin(V)
                   end,
             {ok, #{namespace => arg_str(Ns),
-                   prefix => PrefixAtom,
+                   prefix => prefix_atom(Prefix0),
+                   prefix_bin => PrefixBin,
                    yang_version => Ver}}
     end.
 
@@ -121,16 +166,191 @@ load_compiled(#{prefix := Prefix, namespace := NsUri, nodes := Nodes}, Opts) ->
     end.
 
 %%--------------------------------------------------------------------
+%% Imports, includes, local maps
+%%--------------------------------------------------------------------
+
+prepare_module(Body, Ctx0) ->
+    case merge_includes(Body, Ctx0) of
+        {error, _} = Err ->
+            Err;
+        {ok, Merged, Ctx1} ->
+            case load_imports(Merged, Ctx1) of
+                {error, _} = Err ->
+                    Err;
+                {ok, Imports, Ctx2} ->
+                    Ctx3 = Ctx2#{imports => Imports,
+                                 typedefs => collect_typedefs_here(Merged),
+                                 groupings => collect_groupings_here(Merged)},
+                    {ok, Merged, Ctx3}
+            end
+    end.
+
+merge_includes(Body, Ctx) ->
+    merge_includes(Body, Ctx, []).
+
+merge_includes([], Ctx, Acc) ->
+    {ok, lists:reverse(Acc), Ctx};
+merge_includes([{include, Ln, Name, Sub} | Rest], Ctx, Acc) ->
+    Rev = find_arg('revision-date', Sub),
+    case load_mod(arg_str(Name), Rev, include, Ctx) of
+        {error, _} = Err ->
+            prepend_error(Err, Ln, Name);
+        {ok, SubMod, Ctx1} ->
+            merge_includes(Rest, Ctx1, lists:reverse(maps:get(body, SubMod)) ++ Acc)
+    end;
+merge_includes([Stmt | Rest], Ctx, Acc) ->
+    merge_includes(Rest, Ctx, [Stmt | Acc]).
+
+load_imports(Body, Ctx) ->
+    load_imports(Body, Ctx, #{}).
+
+load_imports([], Ctx, Acc) ->
+    {ok, Acc, Ctx};
+load_imports([{import, Ln, Name, Sub} | Rest], Ctx, Acc) ->
+    case find_arg(prefix, Sub) of
+        undefined ->
+            {error, {Ln, missing_import_prefix, arg_str(Name)}};
+        Prefix0 ->
+            Rev = find_arg('revision-date', Sub),
+            case load_mod(arg_str(Name), Rev, import, Ctx) of
+                {error, _} = Err ->
+                    prepend_error(Err, Ln, Name);
+                {ok, Imp, Ctx1} ->
+                    load_imports(Rest, Ctx1, Acc#{arg_bin(Prefix0) => Imp})
+            end
+    end;
+load_imports([_ | Rest], Ctx, Acc) ->
+    load_imports(Rest, Ctx, Acc).
+
+load_mod(Name, Rev, Kind, Ctx) ->
+    Key = {Name, rev_key(Rev)},
+    case maps:find(Key, maps:get(loaded, Ctx)) of
+        {ok, loading} ->
+            {error, {circular_import, Name}};
+        {ok, Mod} ->
+            {ok, Mod, Ctx};
+        error ->
+            case find_yang_file(Name, Rev, Ctx) of
+                {error, _} = Err ->
+                    Err;
+                {ok, File} ->
+                    CtxL = Ctx#{loaded => maps:put(Key, loading, maps:get(loaded, Ctx)),
+                                file => File},
+                    case mgmtd_yang_parse:file(File, scan_opts(maps:get(opts, Ctx, #{}))) of
+                        {error, _} = Err ->
+                            Err;
+                        {ok, Stmts} ->
+                            build_mod(Stmts, Kind, Key, CtxL)
+                    end
+            end
+    end.
+
+rev_key(undefined) -> latest;
+rev_key(Rev) -> arg_str(Rev).
+
+build_mod([{module, _Ln, Name, Body}], import, Key, Ctx) ->
+    case header(Body) of
+        {error, _} = Err ->
+            Err;
+        {ok, Header} ->
+            finish_mod(module, arg_bin(Name), Body, Header, Key, Ctx)
+    end;
+build_mod([{submodule, Ln, Name, Body}], include, Key, Ctx) ->
+    case lists:keyfind('belongs-to', 1, Body) of
+        false ->
+            {error, {Ln, missing_belongs_to, arg_str(Name)}};
+        {'belongs-to', _, _Parent, _Sub} ->
+            PrefixBin = case find_arg(prefix, Body) of
+                            undefined -> maps:get(mod_prefix, Ctx);
+                            P -> arg_bin(P)
+                        end,
+            Header = #{prefix_bin => PrefixBin, prefix => prefix_atom(PrefixBin),
+                       namespace => "", yang_version => <<"1">>},
+            finish_mod(submodule, arg_bin(Name), Body, Header, Key, Ctx)
+    end;
+build_mod([{submodule, Ln, Name, _}], import, _Key, _Ctx) ->
+    {error, {Ln, expected_module, arg_str(Name)}};
+build_mod([{module, Ln, Name, _}], include, _Key, _Ctx) ->
+    {error, {Ln, expected_submodule, arg_str(Name)}};
+build_mod(Other, _Kind, _Key, _Ctx) ->
+    {error, {expected_module, Other}}.
+
+finish_mod(Kind, Name, Body, Header, Key, Ctx) ->
+    case merge_includes(Body, Ctx) of
+        {error, _} = Err ->
+            Err;
+        {ok, Merged0, Ctx1} ->
+            Merged = strip_belongs_to(Merged0),
+            case load_imports(Merged, Ctx1) of
+                {error, _} = Err ->
+                    Err;
+                {ok, Imports, Ctx2} ->
+                    Mod = #{kind => Kind,
+                            name => Name,
+                            prefix => maps:get(prefix_bin, Header),
+                            typedefs => collect_typedefs_here(Merged),
+                            groupings => collect_groupings_here(Merged),
+                            features => [arg_bin(A) || {feature, _, A, _} <- Merged],
+                            imports => Imports,
+                            body => Merged},
+                    Loaded = maps:put(Key, Mod, maps:get(loaded, Ctx2)),
+                    {ok, Mod, Ctx2#{loaded => Loaded}}
+            end
+    end.
+
+strip_belongs_to(Body) ->
+    [S || S <- Body, element(1, S) =/= 'belongs-to'].
+
+find_yang_file(Name, Rev, Ctx) ->
+    Names = yang_filenames(Name, Rev),
+    find_yang_file_in(maps:get(search_path, Ctx), Names, Name).
+
+yang_filenames(Name, undefined) ->
+    [Name ++ ".yang"];
+yang_filenames(Name, Rev) ->
+    R = arg_str(Rev),
+    [Name ++ "@" ++ R ++ ".yang", Name ++ ".yang"].
+
+find_yang_file_in([], _Names, Name) ->
+    {error, {module_not_found, Name}};
+find_yang_file_in([Dir | Dirs], Names, Name) ->
+    case first_existing([filename:join(Dir, N) || N <- Names]) of
+        false ->
+            find_yang_file_in(Dirs, Names, Name);
+        File ->
+            {ok, File}
+    end.
+
+first_existing([]) ->
+    false;
+first_existing([F | Fs]) ->
+    case filelib:is_regular(F) of
+        true -> F;
+        false -> first_existing(Fs)
+    end.
+
+%%--------------------------------------------------------------------
 %% Body walk
 %%--------------------------------------------------------------------
 
-data_nodes(Body, Ctx) ->
+data_nodes(Body, Ctx0) ->
+    Ctx = Ctx0#{typedefs => maps:merge(maps:get(typedefs, Ctx0),
+                                       collect_typedefs_here(Body)),
+                groupings => maps:merge(maps:get(groupings, Ctx0),
+                                        collect_groupings_here(Body))},
     data_nodes(Body, Ctx, []).
 
 data_nodes([], _Ctx, Acc) ->
     {ok, lists:reverse(Acc)};
-data_nodes([{uses, Ln, Arg, _} | _], _Ctx, _Acc) ->
-    {error, {Ln, unsupported_statement, uses, arg_str(Arg)}};
+data_nodes([{uses, Ln, Arg, UsesSub} | Rest], Ctx, Acc) ->
+    case expand_uses(Ln, Arg, UsesSub, Ctx) of
+        {error, _} = Err ->
+            Err;
+        {ok, Nodes} ->
+            data_nodes(Rest, Ctx, lists:reverse(Nodes) ++ Acc);
+        skip ->
+            data_nodes(Rest, Ctx, Acc)
+    end;
 data_nodes([{augment, Ln, Arg, _} | _], _Ctx, _Acc) ->
     {error, {Ln, unsupported_statement, augment, arg_str(Arg)}};
 data_nodes([{choice, Ln, Arg, _} | _], _Ctx, _Acc) ->
@@ -148,7 +368,55 @@ data_nodes([{Stmt, Ln, Arg, Sub} | Rest], Ctx, Acc)
 data_nodes([_Other | Rest], Ctx, Acc) ->
     data_nodes(Rest, Ctx, Acc).
 
-compile_node(container, _Ln, Arg, Sub, Ctx) ->
+expand_uses(Ln, Arg, UsesSub, Ctx) ->
+    case feature_ok(UsesSub, Ctx) of
+        false ->
+            skip;
+        true ->
+            case lists:keyfind(augment, 1, UsesSub) of
+                {augment, ALn, AArg, _} ->
+                    {error, {ALn, unsupported_statement, augment, arg_str(AArg)}};
+                false ->
+                    GName = arg_bin(Arg),
+                    case lookup_grouping(GName, Ctx) of
+                        error ->
+                            {error, {Ln, unknown_grouping, arg_str(Arg)}};
+                        {ok, GBody, GCtx0} ->
+                            Stack = maps:get(uses_stack, Ctx, []),
+                            case lists:member(GName, Stack) of
+                                true ->
+                                    {error, {Ln, circular_uses, arg_str(Arg)}};
+                                false ->
+                                    GCtx = GCtx0#{parent_config => maps:get(parent_config, Ctx),
+                                                  uses_stack => [GName | Stack],
+                                                  features => maps:get(features, Ctx)},
+                                    case data_nodes(GBody, GCtx) of
+                                        {error, _} = Err ->
+                                            Err;
+                                        {ok, Nodes0} ->
+                                            Refines = [{refine, RLn, P, I}
+                                                       || {refine, RLn, P, I} <- UsesSub],
+                                            case apply_refines(Nodes0, Refines) of
+                                                {error, _} = Err ->
+                                                    Err;
+                                                {ok, Nodes1} ->
+                                                    {ok, propagate_uses_opts(Nodes1, UsesSub)}
+                                            end
+                                    end
+                            end
+                    end
+            end
+    end.
+
+compile_node(Kind, Ln, Arg, Sub, Ctx) ->
+    case feature_ok(Sub, Ctx) of
+        false ->
+            {skip, if_feature};
+        true ->
+            compile_node_feature(Kind, Ln, Arg, Sub, Ctx)
+    end.
+
+compile_node_feature(container, _Ln, Arg, Sub, Ctx) ->
     case node_config(Sub, Ctx) of
         skip ->
             {skip, config};
@@ -165,7 +433,7 @@ compile_node(container, _Ln, Arg, Sub, Ctx) ->
                     Error
             end
     end;
-compile_node(list, Ln, Arg, Sub, Ctx) ->
+compile_node_feature(list, Ln, Arg, Sub, Ctx) ->
     case node_config(Sub, Ctx) of
         skip ->
             {skip, config};
@@ -191,7 +459,7 @@ compile_node(list, Ln, Arg, Sub, Ctx) ->
                     Error
             end
     end;
-compile_node(leaf, Ln, Arg, Sub, Ctx) ->
+compile_node_feature(leaf, Ln, Arg, Sub, Ctx) ->
     case node_config(Sub, Ctx) of
         skip ->
             {skip, config};
@@ -210,7 +478,7 @@ compile_node(leaf, Ln, Arg, Sub, Ctx) ->
                     prepend_error(Error, Ln, Arg)
             end
     end;
-compile_node('leaf-list', Ln, Arg, Sub, Ctx) ->
+compile_node_feature('leaf-list', Ln, Arg, Sub, Ctx) ->
     case node_config(Sub, Ctx) of
         skip ->
             {skip, config};
@@ -233,10 +501,155 @@ prepend_error({error, Reason}, Ln, Arg) ->
     {error, {Ln, arg_str(Arg), Reason}}.
 
 %%--------------------------------------------------------------------
+%% Refine (applied to compiled records after grouping expansion)
+%%--------------------------------------------------------------------
+
+apply_refines(Nodes, []) ->
+    {ok, Nodes};
+apply_refines(Nodes, [{refine, Ln, Path, Items} | Rest]) ->
+    Ids = schema_id_path(arg_str(Path)),
+    case refine_walk(Nodes, Ids, Items, Ln, arg_str(Path)) of
+        {ok, Nodes1} ->
+            apply_refines(Nodes1, Rest);
+        Error ->
+            Error
+    end.
+
+schema_id_path(Path) ->
+    [local_id(P) || P <- string:tokens(string:trim(Path, both, "/"), "/")].
+
+local_id(Id) ->
+    case string:split(Id, ":") of
+        [_Pfx, Name] -> Name;
+        [Name] -> Name
+    end.
+
+refine_walk(_Nodes, [], _Items, Ln, Path) ->
+    {error, {Ln, refine_not_found, Path}};
+refine_walk(Nodes, [Id], Items, Ln, Path) ->
+    case replace_named(Nodes, Id, fun(N) -> refine_node(N, Items) end) of
+        {ok, Nodes1} -> {ok, Nodes1};
+        not_found -> {error, {Ln, refine_not_found, Path}}
+    end;
+refine_walk(Nodes, [Id | Rest], Items, Ln, Path) ->
+    case replace_named(Nodes, Id, fun(N) -> refine_children(N, Rest, Items, Ln, Path) end) of
+        {ok, Nodes1} -> {ok, Nodes1};
+        not_found -> {error, {Ln, refine_not_found, Path}}
+    end.
+
+replace_named(Nodes, Id, Fun) ->
+    replace_named(Nodes, Id, Fun, [], false).
+
+replace_named([], _Id, _Fun, _Acc, false) ->
+    not_found;
+replace_named([], _Id, _Fun, Acc, true) ->
+    {ok, lists:reverse(Acc)};
+replace_named([N | Ns], Id, Fun, Acc, Found) ->
+    case node_name(N) =:= Id of
+        true ->
+            case Fun(N) of
+                {error, _} = Err ->
+                    Err;
+                {ok, N1} ->
+                    replace_named(Ns, Id, Fun, [N1 | Acc], true);
+                N1 ->
+                    replace_named(Ns, Id, Fun, [N1 | Acc], true)
+            end;
+        false ->
+            replace_named(Ns, Id, Fun, [N | Acc], Found)
+    end.
+
+refine_children(#container{children = Ch} = N, Rest, Items, Ln, Path) ->
+    case refine_walk(Ch(), Rest, Items, Ln, Path) of
+        {ok, Ch1} -> N#container{children = fun() -> Ch1 end};
+        Err -> Err
+    end;
+refine_children(#list{children = Ch} = N, Rest, Items, Ln, Path) ->
+    case refine_walk(Ch(), Rest, Items, Ln, Path) of
+        {ok, Ch1} -> N#list{children = fun() -> Ch1 end};
+        Err -> Err
+    end;
+refine_children(_Other, _Rest, _Items, Ln, Path) ->
+    {error, {Ln, refine_not_found, Path}}.
+
+refine_node(#leaf{} = N, Items) ->
+    N#leaf{desc = refine_desc(Items, N#leaf.desc),
+           default = refine_default(Items, N#leaf.default, N#leaf.type),
+           mandatory = refine_bool(mandatory, Items, N#leaf.mandatory),
+           config = refine_bool(config, Items, N#leaf.config),
+           opts = refine_merge_opts(Items, N#leaf.opts)};
+refine_node(#leaf_list{} = N, Items) ->
+    N#leaf_list{desc = refine_desc(Items, N#leaf_list.desc),
+                min_elements = refine_min(Items, N#leaf_list.min_elements),
+                max_elements = refine_max(Items, N#leaf_list.max_elements),
+                config = refine_bool(config, Items, N#leaf_list.config),
+                opts = refine_merge_opts(Items, N#leaf_list.opts)};
+refine_node(#list{} = N, Items) ->
+    N#list{desc = refine_desc(Items, N#list.desc),
+           min_elements = refine_min(Items, N#list.min_elements),
+           max_elements = refine_max(Items, N#list.max_elements),
+           config = refine_bool(config, Items, N#list.config),
+           opts = refine_merge_opts(Items, N#list.opts)};
+refine_node(#container{} = N, Items) ->
+    N#container{desc = refine_desc(Items, N#container.desc),
+                config = refine_bool(config, Items, N#container.config),
+                opts = refine_merge_opts(Items, N#container.opts)}.
+
+refine_desc(Items, Default) ->
+    case find_arg(description, Items) of
+        undefined -> Default;
+        Arg -> arg_str(Arg)
+    end.
+
+refine_default(Items, Default, Type) ->
+    case find_arg(default, Items) of
+        undefined -> Default;
+        Arg -> coerce_default(Type, Arg)
+    end.
+
+refine_bool(Key, Items, Default) ->
+    case find_arg(Key, Items) of
+        undefined -> Default;
+        true -> true;
+        false -> false;
+        _ -> Default
+    end.
+
+refine_min(Items, Default) ->
+    case find_arg('min-elements', Items) of
+        undefined -> Default;
+        N -> arg_int(N)
+    end.
+
+refine_max(Items, Default) ->
+    case find_arg('max-elements', Items) of
+        undefined -> Default;
+        unbounded -> unlimited;
+        N -> arg_int(N)
+    end.
+
+refine_merge_opts(Items, Opts) ->
+    Extra = lists:flatten([must_opts(Items), when_opt(Items),
+                           unique_opt(Items), presence_opt(Items),
+                           if_feature_opt(Items)]),
+    Extra ++ Opts.
+
+propagate_uses_opts(Nodes, UsesSub) ->
+    Extra = lists:flatten([when_opt(UsesSub), if_feature_opt(UsesSub)]),
+    case Extra of
+        [] -> Nodes;
+        _ -> [add_opts(N, Extra) || N <- Nodes]
+    end.
+
+add_opts(#container{opts = O} = N, Extra) -> N#container{opts = Extra ++ O};
+add_opts(#list{opts = O} = N, Extra) -> N#list{opts = Extra ++ O};
+add_opts(#leaf{opts = O} = N, Extra) -> N#leaf{opts = Extra ++ O};
+add_opts(#leaf_list{opts = O} = N, Extra) -> N#leaf_list{opts = Extra ++ O}.
+
+%%--------------------------------------------------------------------
 %% Config, keys, cardinality
 %%--------------------------------------------------------------------
 
-%% if-feature is ignored until feature support lands; config false is kept.
 node_config(Sub, Ctx) ->
     Parent = maps:get(parent_config, Ctx),
     case find_arg(config, Sub) of
@@ -277,24 +690,116 @@ compile_type(Sub, Ctx) ->
     end.
 
 resolve_type(Name, Sub, Ln, Ctx, Seen) ->
-    case builtin_type(Name, Sub) of
-        {ok, _} = Ok ->
-            Ok;
-        unknown ->
-            case lists:member(Name, Seen) of
-                true ->
-                    {error, {Ln, circular_typedef, Name}};
-                false ->
-                    Typedefs = maps:get(typedefs, Ctx),
-                    case maps:find(Name, Typedefs) of
-                        {ok, {BaseName, BaseSub}} ->
-                            resolve_type(BaseName, merge_type_sub(BaseSub, Sub),
-                                         Ln, Ctx, [Name | Seen]);
-                        error ->
-                            {error, {Ln, unknown_type, arg_str(Name)}}
+    case lists:member(Name, Seen) of
+        true ->
+            {error, {Ln, circular_typedef, Name}};
+        false ->
+            case builtin_type(Name, Sub) of
+                {ok, _} = Ok ->
+                    Ok;
+                unknown ->
+                    case well_known_type(typedef_local_name(Name), Sub) of
+                        {ok, _} = Ok ->
+                            Ok;
+                        unknown ->
+                            case lookup_typedef(Name, Ctx) of
+                                {ok, BaseName, BaseSub, DefCtx} ->
+                                    case well_known_type(typedef_local_name(Name),
+                                                         merge_type_sub(BaseSub, Sub)) of
+                                        {ok, _} = Ok ->
+                                            Ok;
+                                        unknown ->
+                                            resolve_type(BaseName,
+                                                         merge_type_sub(BaseSub, Sub),
+                                                         Ln, DefCtx, [Name | Seen])
+                                    end;
+                                error ->
+                                    {error, {Ln, unknown_type, arg_str(Name)}}
+                            end
                     end
             end
     end.
+
+typedef_local_name(Name) ->
+    case binary:split(Name, <<":">>) of
+        [_Pfx, Local] -> Local;
+        [Local] -> Local
+    end.
+
+%% Map well-known IETF typedefs onto mgmtd's existing casters.
+well_known_type(<<"ip-address">>, _) -> {ok, 'inet:ip-address'};
+well_known_type(<<"ipv4-address">>, _) -> {ok, 'inet:ip-address'};
+well_known_type(<<"ipv6-address">>, _) -> {ok, 'inet:ip-address'};
+well_known_type(<<"ip-address-no-zone">>, _) -> {ok, 'inet:ip-address'};
+well_known_type(<<"ipv4-address-no-zone">>, _) -> {ok, 'inet:ip-address'};
+well_known_type(<<"ipv6-address-no-zone">>, _) -> {ok, 'inet:ip-address'};
+well_known_type(<<"port-number">>, Sub) -> int_type('inet:port-number', Sub);
+well_known_type(_, _) -> unknown.
+
+lookup_typedef(Name, Ctx) ->
+    case binary:split(Name, <<":">>) of
+        [Local] ->
+            lookup_local_typedef(Local, Ctx);
+        [Pfx, Local] ->
+            case Pfx =:= maps:get(mod_prefix, Ctx) of
+                true ->
+                    lookup_local_typedef(Local, Ctx);
+                false ->
+                    case maps:find(Pfx, maps:get(imports, Ctx)) of
+                        {ok, Imp} ->
+                            case maps:find(Local, maps:get(typedefs, Imp)) of
+                                {ok, {Base, Sub}} ->
+                                    {ok, Base, Sub, import_ctx(Imp, Ctx)};
+                                error ->
+                                    error
+                            end;
+                        error ->
+                            error
+                    end
+            end
+    end.
+
+lookup_local_typedef(Local, Ctx) ->
+    case maps:find(Local, maps:get(typedefs, Ctx)) of
+        {ok, {Base, Sub}} -> {ok, Base, Sub, Ctx};
+        error -> error
+    end.
+
+lookup_grouping(Name, Ctx) ->
+    case binary:split(Name, <<":">>) of
+        [Local] ->
+            lookup_local_grouping(Local, Ctx);
+        [Pfx, Local] ->
+            case Pfx =:= maps:get(mod_prefix, Ctx) of
+                true ->
+                    lookup_local_grouping(Local, Ctx);
+                false ->
+                    case maps:find(Pfx, maps:get(imports, Ctx)) of
+                        {ok, Imp} ->
+                            case maps:find(Local, maps:get(groupings, Imp)) of
+                                {ok, Body} ->
+                                    {ok, Body, import_ctx(Imp, Ctx)};
+                                error ->
+                                    error
+                            end;
+                        error ->
+                            error
+                    end
+            end
+    end.
+
+lookup_local_grouping(Local, Ctx) ->
+    case maps:find(Local, maps:get(groupings, Ctx)) of
+        {ok, Body} -> {ok, Body, Ctx};
+        error -> error
+    end.
+
+import_ctx(Imp, Ctx) ->
+    Ctx#{typedefs => maps:get(typedefs, Imp),
+         groupings => maps:get(groupings, Imp),
+         imports => maps:get(imports, Imp),
+         mod_prefix => maps:get(prefix, Imp),
+         module => maps:get(name, Imp)}.
 
 builtin_type(<<"binary">>, _Sub) -> {ok, string};
 builtin_type(<<"bits">>, Sub) -> {ok, {bits, bit_names(Sub)}};
@@ -319,6 +824,7 @@ builtin_type(<<"string">>, _Sub) ->
     {ok, string};
 builtin_type(<<"union">>, Sub) ->
     {ok, {union, [T || {type, _, T, _} <- Sub]}};
+%% Fallback when a module writes inet:* without importing ietf-inet-types.
 builtin_type(<<"inet:ip-address">>, _) -> {ok, 'inet:ip-address'};
 builtin_type(<<"inet:ipv4-address">>, _) -> {ok, 'inet:ip-address'};
 builtin_type(<<"inet:ipv6-address">>, _) -> {ok, 'inet:ip-address'};
@@ -356,10 +862,9 @@ parse_range(Arg) ->
     Bounds = [range_part(P) || P <- Parts],
     Mins = [Min || {Min, _} <- Bounds, is_integer(Min)],
     Maxs = [Max || {_, Max} <- Bounds, is_integer(Max)],
-    Range = [],
     Range1 = case Mins of
-                 [] -> Range;
-                 _ -> [{min, lists:min(Mins)} | Range]
+                 [] -> [];
+                 _ -> [{min, lists:min(Mins)}]
              end,
     Range2 = case Maxs of
                  [] -> Range1;
@@ -395,23 +900,26 @@ range_bound(S, _) ->
         error:_ -> undefined
     end.
 
-collect_typedefs(Body) ->
-    collect_typedefs(Body, #{}).
+collect_typedefs_here(Body) ->
+    lists:foldl(
+      fun({typedef, _, Name, Sub}, Acc) ->
+              case lists:keyfind(type, 1, Sub) of
+                  {type, _, TypeName, TypeSub} ->
+                      Acc#{arg_bin(Name) => {arg_bin(TypeName), TypeSub}};
+                  false ->
+                      Acc
+              end;
+         (_, Acc) ->
+              Acc
+      end, #{}, Body).
 
-collect_typedefs([], Acc) ->
-    Acc;
-collect_typedefs([{typedef, _Ln, Name, Sub} | Rest], Acc) ->
-    case lists:keyfind(type, 1, Sub) of
-        {type, _, TypeName, TypeSub} ->
-            collect_typedefs(Rest, Acc#{arg_bin(Name) => {arg_bin(TypeName), TypeSub}});
-        false ->
-            collect_typedefs(Rest, Acc)
-    end;
-collect_typedefs([{Stmt, _, _, Sub} | Rest], Acc)
-  when Stmt =:= grouping; Stmt =:= container; Stmt =:= list ->
-    collect_typedefs(Rest, collect_typedefs(Sub, Acc));
-collect_typedefs([_ | Rest], Acc) ->
-    collect_typedefs(Rest, Acc).
+collect_groupings_here(Body) ->
+    lists:foldl(
+      fun({grouping, _, Name, Sub}, Acc) ->
+              Acc#{arg_bin(Name) => Sub};
+         (_, Acc) ->
+              Acc
+      end, #{}, Body).
 
 merge_type_sub(BaseSub, ExtraSub) ->
     ExtraSub ++ BaseSub.
@@ -445,6 +953,129 @@ is_int_type({T, _Range}) ->
     is_int_type(T);
 is_int_type(_) ->
     false.
+
+%%--------------------------------------------------------------------
+%% if-feature
+%%--------------------------------------------------------------------
+
+normalize_features(all) -> all;
+normalize_features(none) -> none;
+normalize_features(List) when is_list(List) ->
+    [feat_bin(F) || F <- List];
+normalize_features(Map) when is_map(Map) ->
+    maps:fold(fun(K, Vs, Acc) ->
+                      P = feat_bin(K),
+                      [feat_bin(V) || V <- Vs] ++
+                          [<<P/binary, $:, (feat_bin(V))/binary>> || V <- Vs] ++ Acc
+              end, [], Map).
+
+feat_bin(A) when is_atom(A) -> atom_to_binary(A, utf8);
+feat_bin(B) when is_binary(B) -> B;
+feat_bin(L) when is_list(L) -> list_to_binary(L).
+
+feature_ok(Sub, Ctx) ->
+    Exprs = [A || {'if-feature', _, A, _} <- Sub],
+    lists:all(fun(E) -> eval_if_feature(E, Ctx) end, Exprs).
+
+eval_if_feature(_Arg, #{features := all}) ->
+    true;
+eval_if_feature(Arg, #{features := none} = Ctx) ->
+    eval_if_feature(Arg, Ctx#{features => []});
+eval_if_feature(Arg, Ctx) ->
+    Enabled = maps:get(features, Ctx),
+    case parse_if_feature(arg_str(Arg)) of
+        {ok, Expr} ->
+            eval_feat_ast(Expr, Enabled);
+        {error, _} ->
+            lists:member(arg_bin(Arg), Enabled)
+    end.
+
+eval_feat_ast({'not', E}, Enabled) ->
+    not eval_feat_ast(E, Enabled);
+eval_feat_ast({'and', A, B}, Enabled) ->
+    eval_feat_ast(A, Enabled) andalso eval_feat_ast(B, Enabled);
+eval_feat_ast({'or', A, B}, Enabled) ->
+    eval_feat_ast(A, Enabled) orelse eval_feat_ast(B, Enabled);
+eval_feat_ast({feat, Name}, Enabled) ->
+    Local = typedef_local_name(Name),
+    lists:member(Name, Enabled) orelse lists:member(Local, Enabled).
+
+parse_if_feature(Str) ->
+    try if_or(tokens_if(Str)) of
+        {Expr, []} -> {ok, Expr};
+        _ -> {error, trailing}
+    catch
+        throw:Reason -> {error, Reason}
+    end.
+
+tokens_if(Str) ->
+    tokens_if(Str, []).
+
+tokens_if([], Acc) ->
+    lists:reverse(Acc);
+tokens_if([C | Rest], Acc) when C =:= $\s; C =:= $\t; C =:= $\n; C =:= $\r ->
+    tokens_if(Rest, Acc);
+tokens_if([$( | Rest], Acc) ->
+    tokens_if(Rest, ['(' | Acc]);
+tokens_if([$) | Rest], Acc) ->
+    tokens_if(Rest, [')' | Acc]);
+tokens_if(Str, Acc) ->
+    {Tok, Rest} = if_ident(Str),
+    tokens_if(Rest, [Tok | Acc]).
+
+if_ident(Str) ->
+    {Word, Rest} = lists:splitwith(
+                     fun(C) ->
+                             (C >= $a andalso C =< $z) orelse
+                                 (C >= $A andalso C =< $Z) orelse
+                                 (C >= $0 andalso C =< $9) orelse
+                                 C =:= $_ orelse C =:= $- orelse
+                                 C =:= $. orelse C =:= $:
+                     end, Str),
+    case Word of
+        "and" -> {'and', Rest};
+        "or" -> {'or', Rest};
+        "not" -> {'not', Rest};
+        [] -> throw(empty_ident);
+        _ -> {{feat, list_to_binary(Word)}, Rest}
+    end.
+
+if_or(Toks) ->
+    {E1, T1} = if_and(Toks),
+    if_or_rest(E1, T1).
+
+if_or_rest(E, ['or' | T]) ->
+    {E2, T2} = if_and(T),
+    if_or_rest({'or', E, E2}, T2);
+if_or_rest(E, T) ->
+    {E, T}.
+
+if_and(Toks) ->
+    {E1, T1} = if_not(Toks),
+    if_and_rest(E1, T1).
+
+if_and_rest(E, ['and' | T]) ->
+    {E2, T2} = if_not(T),
+    if_and_rest({'and', E, E2}, T2);
+if_and_rest(E, T) ->
+    {E, T}.
+
+if_not(['not' | T]) ->
+    {E, T1} = if_not(T),
+    {{'not', E}, T1};
+if_not(Toks) ->
+    if_primary(Toks).
+
+if_primary(['(' | T]) ->
+    {E, T1} = if_or(T),
+    case T1 of
+        [')' | T2] -> {E, T2};
+        _ -> throw(missing_rparen)
+    end;
+if_primary([{feat, _} = F | T]) ->
+    {F, T};
+if_primary(_) ->
+    throw(expected_feature).
 
 %%--------------------------------------------------------------------
 %% opts / extras kept for later XPath and constraints

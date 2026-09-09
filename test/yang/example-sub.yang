@@ -1,0 +1,11 @@
+submodule example-sub {
+  belongs-to example-parent {
+    prefix p;
+  }
+
+  container extra {
+    leaf from-sub {
+      type uint8;
+    }
+  }
+}

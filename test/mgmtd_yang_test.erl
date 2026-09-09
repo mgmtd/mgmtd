@@ -65,9 +65,104 @@ compile_example_server_test() ->
     #list{key_names = ["host", "port"]} =
         lists:keyfind("clients", #list.name, Client()).
 
-uses_is_rejected_test() ->
-    {error, {_Ln, unsupported_statement, uses, "g"}} =
-        mgmtd_schema_yang:compile_file("test/yang/uses-unsupported.yang").
+uses_inlines_grouping_test() ->
+    {ok, #{nodes := Nodes}} =
+        mgmtd_schema_yang:compile_file("test/yang/uses-unsupported.yang"),
+    #container{name = "c", children = Ch} =
+        lists:keyfind("c", #container.name, Nodes),
+    #leaf{name = "x", type = string} =
+        lists:keyfind("x", #leaf.name, Ch()).
+
+uses_refine_and_nested_test() ->
+    {ok, #{nodes := Nodes}} =
+        mgmtd_schema_yang:compile_file("test/yang/example-groupings.yang"),
+    #container{name = "server", children = Server} =
+        lists:keyfind("server", #container.name, Nodes),
+    #leaf{name = "port", default = 443, desc = "HTTPS port"} =
+        lists:keyfind("port", #leaf.name, Server()),
+    #leaf{name = "host", default = "127.0.0.1"} =
+        lists:keyfind("host", #leaf.name, Server()),
+    #container{name = "proxy", children = Proxy} =
+        lists:keyfind("proxy", #container.name, Nodes),
+    #container{name = "inner", children = Inner} =
+        lists:keyfind("inner", #container.name, Proxy()),
+    #leaf{name = "port", default = 80} =
+        lists:keyfind("port", #leaf.name, Inner()).
+
+import_ietf_types_test() ->
+    {ok, #{prefix := imp, nodes := Nodes}} =
+        mgmtd_schema_yang:compile_file("test/yang/example-import.yang"),
+    #container{name = "net", children = Net} =
+        lists:keyfind("net", #container.name, Nodes),
+    #leaf{name = "port", type = 'inet:port-number', default = 80} =
+        lists:keyfind("port", #leaf.name, Net()),
+    #leaf{name = "addr", type = 'inet:ip-address'} =
+        lists:keyfind("addr", #leaf.name, Net()),
+    #leaf{name = "ticks", type = uint32} =
+        lists:keyfind("ticks", #leaf.name, Net()),
+    #leaf{name = "mac", type = string} =
+        lists:keyfind("mac", #leaf.name, Net()).
+
+compile_ietf_yang_types_no_data_nodes_test() ->
+    {ok, #{module := "ietf-yang-types", prefix := yang, nodes := []}} =
+        mgmtd_schema_yang:compile_file("priv/yang/ietf-yang-types.yang").
+
+imported_grouping_test() ->
+    {ok, #{nodes := Nodes}} =
+        mgmtd_schema_yang:compile_file("test/yang/example-uses-import.yang"),
+    #list{name = "items", key_names = ["name"], children = Ch} =
+        lists:keyfind("items", #list.name, Nodes),
+    #leaf{name = "name", type = string} =
+        lists:keyfind("name", #leaf.name, Ch()),
+    #leaf{name = "value", type = string} =
+        lists:keyfind("value", #leaf.name, Ch()).
+
+include_submodule_test() ->
+    {ok, #{nodes := Nodes}} =
+        mgmtd_schema_yang:compile_file("test/yang/example-parent.yang"),
+    Names = lists:sort([name(N) || N <- Nodes]),
+    ?assertEqual(["extra", "top"], Names),
+    #container{children = Extra} =
+        lists:keyfind("extra", #container.name, Nodes),
+    #leaf{name = "from-sub", type = uint8} =
+        lists:keyfind("from-sub", #leaf.name, Extra()).
+
+if_feature_default_keeps_all_test() ->
+    {ok, #{nodes := Nodes}} =
+        mgmtd_schema_yang:compile_file("test/yang/example-features.yang"),
+    Leaves = leaf_names(root_children(Nodes)),
+    ?assertEqual(["always", "both", "fancy-leaf", "not-fancy"], lists:sort(Leaves)).
+
+if_feature_none_drops_guarded_test() ->
+    {ok, #{nodes := Nodes}} =
+        mgmtd_schema_yang:compile_file("test/yang/example-features.yang",
+                                       #{features => none}),
+    Leaves = leaf_names(root_children(Nodes)),
+    ?assertEqual(["always", "not-fancy"], lists:sort(Leaves)).
+
+if_feature_named_test() ->
+    {ok, #{nodes := Nodes}} =
+        mgmtd_schema_yang:compile_file("test/yang/example-features.yang",
+                                       #{features => [fancy]}),
+    Leaves = leaf_names(root_children(Nodes)),
+    ?assertEqual(["always", "fancy-leaf"], lists:sort(Leaves)).
+
+circular_uses_test() ->
+    {error, {_Ln, circular_uses, _}} =
+        mgmtd_schema_yang:compile_file("test/yang/example-circular-uses.yang").
+
+missing_import_test() ->
+    Yang = <<"
+        module m {
+          namespace \"urn:m\";
+          prefix m;
+          import no-such-module { prefix x; }
+          leaf n { type string; }
+        }
+    ">>,
+    {ok, Stmts} = mgmtd_yang_parse:string(Yang),
+    {error, {_Ln, "no-such-module", {module_not_found, "no-such-module"}}} =
+        mgmtd_schema_yang:compile(Stmts).
 
 load_yang_module_test() ->
     start_mgmtd(),
@@ -155,3 +250,10 @@ name(#container{name = N}) -> N;
 name(#list{name = N}) -> N;
 name(#leaf{name = N}) -> N;
 name(#leaf_list{name = N}) -> N.
+
+root_children(Nodes) ->
+    #container{children = Ch} = lists:keyfind("root", #container.name, Nodes),
+    Ch().
+
+leaf_names(Children) ->
+    [N || #leaf{name = N} <- Children].

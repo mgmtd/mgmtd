@@ -1,0 +1,16 @@
+module example-uses-import {
+  namespace "urn:example:ui";
+  prefix ui;
+
+  import example-imported-grouping {
+    prefix ig;
+  }
+
+  list items {
+    key "name";
+    uses ig:keys;
+    leaf value {
+      type string;
+    }
+  }
+}

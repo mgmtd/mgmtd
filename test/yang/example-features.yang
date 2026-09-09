@@ -1,0 +1,25 @@
+module example-features {
+  namespace "urn:example:features";
+  prefix feat;
+
+  feature fancy;
+  feature extra;
+
+  container root {
+    leaf always {
+      type string;
+    }
+    leaf fancy-leaf {
+      if-feature fancy;
+      type string;
+    }
+    leaf both {
+      if-feature "fancy and extra";
+      type string;
+    }
+    leaf not-fancy {
+      if-feature "not fancy";
+      type string;
+    }
+  }
+}

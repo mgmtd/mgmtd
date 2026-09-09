@@ -1,0 +1,29 @@
+module example-import {
+  namespace "urn:example:import";
+  prefix imp;
+
+  import ietf-inet-types {
+    prefix inet;
+  }
+
+  import ietf-yang-types {
+    prefix yang;
+  }
+
+  container net {
+    leaf port {
+      type inet:port-number;
+      default 80;
+    }
+    leaf addr {
+      type inet:ip-address;
+      default "127.0.0.1";
+    }
+    leaf ticks {
+      type yang:timeticks;
+    }
+    leaf mac {
+      type yang:mac-address;
+    }
+  }
+}

@@ -1,0 +1,12 @@
+module example-parent {
+  namespace "urn:example:parent";
+  prefix p;
+
+  include example-sub;
+
+  container top {
+    leaf from-parent {
+      type string;
+    }
+  }
+}

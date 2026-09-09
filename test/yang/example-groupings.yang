@@ -1,0 +1,34 @@
+module example-groupings {
+  namespace "urn:example:groupings";
+  prefix g;
+
+  grouping endpoint {
+    leaf host {
+      type string;
+      default "127.0.0.1";
+    }
+    leaf port {
+      type uint16;
+      default 80;
+    }
+  }
+
+  grouping wrapped {
+    container inner {
+      uses endpoint;
+    }
+  }
+
+  container server {
+    uses endpoint {
+      refine port {
+        default 443;
+        description "HTTPS port";
+      }
+    }
+  }
+
+  container proxy {
+    uses wrapped;
+  }
+}
