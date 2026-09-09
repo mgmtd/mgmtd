@@ -10,6 +10,7 @@
 -export([subscribe/2,
          load_json_schema/1, load_json_schema/2,
          load_function_schema/1, load_function_schema/2,
+         load_yang_module/1, load_yang_module/2,
          remove_schema/0, remove_schema/1,
          registered_schemas/0,
          load_config_db/1]).
@@ -69,6 +70,14 @@ load_function_schema(Fun) ->
 
 load_function_schema(Fun, Opts) ->
     mgmtd_schema:load_function_schema(Fun, Opts).
+
+%% @doc Load a YANG 1.1 / 1.0 module file.
+%% Prefix defaults to the module `prefix` statement; namespace is the
+%% module URI. Override with `#{prefix => Atom}`.
+load_yang_module(File) ->
+    mgmtd_schema:load_yang_schema_file(File, #{}).
+load_yang_module(File, Opts) when is_map(Opts) ->
+    mgmtd_schema:load_yang_schema_file(File, Opts).
 
 registered_schemas() ->
     mgmtd_schema:registered_schemas().

@@ -1,6 +1,6 @@
 -module(mgmtd_schema_function).
 
--export([load/2, load_node/4, load_node/5]).
+-export([load/2, load_node/4, load_node/5, load_resolved/3]).
 
 -include("../include/mgmtd.hrl").
 -include("mgmtd_schema.hrl").
@@ -99,6 +99,100 @@ load_node(#leaf{name = Name, desc = Desc, type = Type, default = Default, config
     true = ets:insert_new(mgmtd_commands, Leaf);
 load_node(#leaf_list{name = Name, desc = Desc, type = Type, config = Config0} = Node, Path, Ns, IsConfig, ParentCb) ->
     Config = inherited_config(Config0, IsConfig),
+    Callback = mgmtd_schema:resolve_data_callback(Node#leaf_list.data_callback, ParentCb, Config),
+    FullPath = lists:reverse([Name | Path]),
+    LeafList =
+        #schema{path = {FullPath, Ns},
+                prefix = Ns,
+                node_type = leaf_list,
+                name = Name,
+                type = Type,
+                desc = Desc,
+                data_callback = Callback,
+                min_elements = Node#leaf_list.min_elements,
+                max_elements = Node#leaf_list.max_elements,
+                config = Config,
+                opts = Node#leaf_list.opts},
+    true = ets:insert_new(mgmtd_commands, LeafList).
+
+%% Load records whose `config` flags are already resolved (YANG compiler).
+load_resolved(Prefix, Nodes, Callback) ->
+    load_nodes_resolved(Prefix, Nodes, Callback).
+
+load_nodes_resolved(?DEFAULT_NS, Nodes, Callback) ->
+    lists:foreach(fun(Child) ->
+                          load_node_resolved(Child, [], ?DEFAULT_NS, Callback)
+                  end, Nodes);
+load_nodes_resolved(Prefix, Nodes, Callback) ->
+    Name = atom_to_list(Prefix),
+    case ets:lookup(mgmtd_commands, {[Name], Prefix}) of
+        [] ->
+            Root = (mgmtd_schema:prefix_container(Prefix, Nodes))#container{config = true},
+            load_node_resolved(Root, [], Prefix, Callback);
+        [_] ->
+            lists:foreach(fun(Child) ->
+                                  load_node_resolved(Child, [Name], Prefix, Callback)
+                          end, Nodes)
+    end.
+
+load_resolved_children(Fun, Path, Ns, Callback) ->
+    lists:foreach(fun(Child) ->
+                          load_node_resolved(Child, Path, Ns, Callback)
+                  end, Fun()).
+
+load_node_resolved(#container{name = Name, desc = Desc, config = Config} = Node, Path, Ns, ParentCb) ->
+    Callback = mgmtd_schema:resolve_data_callback(Node#container.data_callback, ParentCb, Config),
+    FullPath = lists:reverse([Name | Path]),
+    Container =
+        #schema{path = {FullPath, Ns},
+                prefix = Ns,
+                node_type = container,
+                name = Name,
+                desc = Desc,
+                data_callback = Callback,
+                config = Config,
+                opts = Node#container.opts},
+    true = ets:insert_new(mgmtd_commands, Container),
+    load_resolved_children(Node#container.children, [Name | Path], Ns, Callback);
+load_node_resolved(#list{name = Name, desc = Desc, key_names = KeyNames, config = Config} = Node, Path, Ns, ParentCb) ->
+    Callback = mgmtd_schema:resolve_data_callback(Node#list.data_callback, ParentCb, Config),
+    assert_key_names(KeyNames, Node#list.children),
+    FullPath = lists:reverse([Name | Path]),
+    List =
+        #schema{path = {FullPath, Ns},
+                prefix = Ns,
+                node_type = list,
+                name = Name,
+                key_names = KeyNames,
+                data_callback = Callback,
+                desc = Desc,
+                min_elements = Node#list.min_elements,
+                max_elements = Node#list.max_elements,
+                has_list = true,
+                config = Config,
+                opts = Node#list.opts},
+    true = ets:insert_new(mgmtd_commands, List),
+    ok = mgmtd_schema:mark_has_list_descendent(Ns, Path),
+    load_resolved_children(Node#list.children, [Name | Path], Ns, Callback);
+load_node_resolved(#leaf{name = Name, desc = Desc, type = Type, default = Default, config = Config} = Node, Path, Ns, ParentCb) ->
+    Callback = mgmtd_schema:resolve_data_callback(Node#leaf.data_callback, ParentCb, Config),
+    FullPath = lists:reverse([Name | Path]),
+    Pattern = proplists:get_value(pattern, Node#leaf.opts, undefined),
+    Leaf =
+        #schema{path = {FullPath, Ns},
+                prefix = Ns,
+                node_type = leaf,
+                name = Name,
+                type = Type,
+                desc = Desc,
+                default = Default,
+                mandatory = Node#leaf.mandatory,
+                data_callback = Callback,
+                pattern = Pattern,
+                config = Config,
+                opts = Node#leaf.opts},
+    true = ets:insert_new(mgmtd_commands, Leaf);
+load_node_resolved(#leaf_list{name = Name, desc = Desc, type = Type, config = Config} = Node, Path, Ns, ParentCb) ->
     Callback = mgmtd_schema:resolve_data_callback(Node#leaf_list.data_callback, ParentCb, Config),
     FullPath = lists:reverse([Name | Path]),
     LeafList =

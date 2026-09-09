@@ -1,0 +1,75 @@
+module example-server {
+  namespace "urn:example:server";
+  prefix ex;
+
+  description
+    "Self-contained module matching mgmtd_test_schema shape.";
+
+  typedef percent {
+    type uint8 {
+      range "0..100";
+    }
+  }
+
+  container interface {
+    description "Interface configuration";
+    leaf speed {
+      type enumeration {
+        enum "1GbE" {
+          description "1 Gigabit/s Ethernet";
+        }
+      }
+      default "1GbE";
+      description "Interface speed";
+    }
+    leaf load {
+      type percent;
+      default 0;
+      description "Load percent";
+    }
+  }
+
+  container server {
+    description "Server configuration";
+    list servers {
+      key "name";
+      description "Server list";
+      leaf name {
+        type string;
+        description "Server name";
+      }
+      leaf host {
+        type inet:ip-address;
+        default "127.0.0.1";
+        description "Server hostname";
+      }
+      leaf port {
+        type inet:port-number;
+        default 80;
+        description "Listen port";
+      }
+    }
+  }
+
+  container client {
+    description "Client configuration";
+    list clients {
+      key "host port";
+      description "Client list";
+      leaf name {
+        type string;
+        description "Server name";
+      }
+      leaf host {
+        type inet:ip-address;
+        default "127.0.0.1";
+        description "Server hostname";
+      }
+      leaf port {
+        type inet:port-number;
+        default 8080;
+        description "Server port";
+      }
+    }
+  }
+}

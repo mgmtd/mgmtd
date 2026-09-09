@@ -8,7 +8,8 @@
 %%%-------------------------------------------------------------------
 -module(mgmtd_schema).
 
--export([load_json_schema_file/1, load_json_schema_file/2, load_function_schema/2]).
+-export([load_json_schema_file/1, load_json_schema_file/2, load_function_schema/2,
+         load_yang_schema_file/1, load_yang_schema_file/2]).
 -export([remove_schema/0, remove_schema/1]).
 -export([prepare_load/3, register_schema/1, register_schema/3,
          unregister_schema/1, registered_schemas/0]).
@@ -75,6 +76,12 @@ load_json_schema_file(File, Opts) ->
 
 load_function_schema(Fun, Opts) ->
     mgmtd_schema_function:load(Fun, Opts).
+
+load_yang_schema_file(File) ->
+    mgmtd_schema_yang:load_file(File, #{}).
+
+load_yang_schema_file(File, Opts) when is_map(Opts) ->
+    mgmtd_schema_yang:load_file(File, Opts).
 
 remove_schema() ->
     remove_schema(?DEFAULT_NS).

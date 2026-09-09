@@ -1,0 +1,12 @@
+module uses-unsupported {
+  namespace "urn:example:uses";
+  prefix u;
+
+  grouping g {
+    leaf x { type string; }
+  }
+
+  container c {
+    uses g;
+  }
+}
