@@ -39,6 +39,14 @@ exit_txn(#cfg_txn{ets_copy = EtsCopy}) ->
 %% Ops are recorded newest-first; apply oldest-first so a delete then
 %% re-add of the same list item in one session lands as the re-add.
 commit(#cfg_txn{ops = Ops} = Txn) ->
+    case mgmtd_yang_xpath:validate_txn(Txn) of
+        {error, _} = Err ->
+            Err;
+        ok ->
+            commit_ops(Txn, Ops)
+    end.
+
+commit_ops(#cfg_txn{} = Txn, Ops) ->
     Fun = fun() ->
                   lists:foreach(fun({set, Path, Value}) ->
                                         mgmtd_cfg_db:insert_path_items(permanent, Path, Value);

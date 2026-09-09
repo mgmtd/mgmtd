@@ -294,6 +294,109 @@ identityref_cast_test() ->
         mgmtd_cfg_db:remove_db(Db, [{backend, mnesia}])
     end.
 
+must_true_commit_test() ->
+    start_mgmtd(),
+    lists:foreach(fun mgmtd:remove_schema/1, mgmtd:registered_schemas()),
+    Db = "test_db_yang_must",
+    ok = mgmtd_cfg_db:remove_db(Db, [{backend, mnesia}]),
+    ok = mgmtd:load_yang_module("test/yang/example-must.yang"),
+    ok = mgmtd_cfg_db:init(Db, [{backend, mnesia}]),
+    try
+        Txn = mgmtd:txn_new(),
+        {ok, P1} = mgmtd_schema:lookup_path(["m", "box", "flag", "true"]),
+        {ok, Txn2} = mgmtd:txn_set(Txn, P1),
+        {ok, _} = mgmtd:txn_commit(Txn2)
+    after
+        mgmtd:remove_schema(m),
+        mgmtd_cfg_db:remove_db(Db, [{backend, mnesia}])
+    end.
+
+when_false_rejects_commit_test() ->
+    start_mgmtd(),
+    lists:foreach(fun mgmtd:remove_schema/1, mgmtd:registered_schemas()),
+    Db = "test_db_yang_when",
+    ok = mgmtd_cfg_db:remove_db(Db, [{backend, mnesia}]),
+    ok = mgmtd:load_yang_module("test/yang/example-must.yang"),
+    ok = mgmtd_cfg_db:init(Db, [{backend, mnesia}]),
+    try
+        Txn = mgmtd:txn_new(),
+        {ok, P1} = mgmtd_schema:lookup_path(["m", "box", "extra", "nope"]),
+        {ok, Txn2} = mgmtd:txn_set(Txn, P1),
+        {error, {when_failed, ["m", "box", "extra"], "../flag = 'true'"}} =
+            mgmtd:txn_commit(Txn2)
+    after
+        mgmtd:remove_schema(m),
+        mgmtd_cfg_db:remove_db(Db, [{backend, mnesia}])
+    end.
+
+when_true_allows_commit_test() ->
+    start_mgmtd(),
+    lists:foreach(fun mgmtd:remove_schema/1, mgmtd:registered_schemas()),
+    Db = "test_db_yang_when_ok",
+    ok = mgmtd_cfg_db:remove_db(Db, [{backend, mnesia}]),
+    ok = mgmtd:load_yang_module("test/yang/example-must.yang"),
+    ok = mgmtd_cfg_db:init(Db, [{backend, mnesia}]),
+    try
+        Txn = mgmtd:txn_new(),
+        {ok, Pf} = mgmtd_schema:lookup_path(["m", "box", "flag", "true"]),
+        {ok, Pe} = mgmtd_schema:lookup_path(["m", "box", "extra", "ok"]),
+        {ok, Txn2} = mgmtd:txn_set(Txn, Pf),
+        {ok, Txn3} = mgmtd:txn_set(Txn2, Pe),
+        {ok, _} = mgmtd:txn_commit(Txn3)
+    after
+        mgmtd:remove_schema(m),
+        mgmtd_cfg_db:remove_db(Db, [{backend, mnesia}])
+    end.
+
+must_false_rejects_commit_test() ->
+    start_mgmtd(),
+    lists:foreach(fun mgmtd:remove_schema/1, mgmtd:registered_schemas()),
+    Db = "test_db_yang_must_fail",
+    ok = mgmtd_cfg_db:remove_db(Db, [{backend, mnesia}]),
+    ok = mgmtd:load_yang_module("test/yang/example-must.yang"),
+    ok = mgmtd_cfg_db:init(Db, [{backend, mnesia}]),
+    try
+        Txn = mgmtd:txn_new(),
+        {ok, Pf} = mgmtd_schema:lookup_path(["m", "box", "flag", "false"]),
+        {ok, Pg} = mgmtd_schema:lookup_path(["m", "box", "gated", "x"]),
+        {ok, Txn2} = mgmtd:txn_set(Txn, Pf),
+        {ok, Txn3} = mgmtd:txn_set(Txn2, Pg),
+        {error, {must_failed, ["m", "box", "gated"], "../flag = 'true'",
+                 "flag must be true"}} =
+            mgmtd:txn_commit(Txn3)
+    after
+        mgmtd:remove_schema(m),
+        mgmtd_cfg_db:remove_db(Db, [{backend, mnesia}])
+    end.
+
+must_current_outgoing_interface_test() ->
+    start_mgmtd(),
+    lists:foreach(fun mgmtd:remove_schema/1, mgmtd:registered_schemas()),
+    Db = "test_db_yang_current",
+    ok = mgmtd_cfg_db:remove_db(Db, [{backend, mnesia}]),
+    ok = mgmtd:load_yang_module("test/yang/example-must.yang"),
+    ok = mgmtd_cfg_db:init(Db, [{backend, mnesia}]),
+    try
+        Txn = mgmtd:txn_new(),
+        {ok, N0} = mgmtd_schema:lookup_path(
+                     ["m", "interface", {"eth0"}, "enabled", "true"]),
+        {ok, N1} = mgmtd_schema:lookup_path(
+                     ["m", "interface", {"eth1"}, "outgoing-interface", "eth0"]),
+        {ok, Txn2} = mgmtd:txn_set(Txn, N0),
+        {ok, Txn3} = mgmtd:txn_set(Txn2, N1),
+        {ok, Txn4} = mgmtd:txn_commit(Txn3),
+        {ok, Off} = mgmtd_schema:lookup_path(
+                      ["m", "interface", {"eth0"}, "enabled", "false"]),
+        {ok, Txn5} = mgmtd:txn_set(Txn4, Off),
+        {error, {must_failed, ["m", "interface", {"eth1"}, "outgoing-interface"],
+                 "/interface[name=current()]/enabled = 'true'",
+                 "Outgoing interface must be enabled"}} =
+            mgmtd:txn_commit(Txn5)
+    after
+        mgmtd:remove_schema(m),
+        mgmtd_cfg_db:remove_db(Db, [{backend, mnesia}])
+    end.
+
 must_and_when_stored_on_opts_test() ->
     Yang = <<"
         module m {

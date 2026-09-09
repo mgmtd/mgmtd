@@ -6,6 +6,7 @@
   {applications,
    [kernel,
     stdlib,
+    xmerl,
     json_polyfill
    ]},
   {env,[]},
