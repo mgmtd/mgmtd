@@ -1,0 +1,23 @@
+module example-choice {
+  namespace "urn:example:choice";
+  prefix ch;
+
+  container link {
+    choice type {
+      default ethernet;
+      case ethernet {
+        leaf eth-name {
+          type string;
+        }
+      }
+      case atm {
+        leaf vpi {
+          type uint16;
+        }
+      }
+      leaf other {
+        type string;
+      }
+    }
+  }
+}

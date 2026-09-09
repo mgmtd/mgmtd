@@ -1,6 +1,6 @@
 -module(mgmtd_schema_function).
 
--export([load/2, load_node/4, load_node/5, load_resolved/3]).
+-export([load/2, load_node/4, load_node/5, load_resolved/3, load_resolved_at/4]).
 
 -include("../include/mgmtd.hrl").
 -include("mgmtd_schema.hrl").
@@ -118,6 +118,19 @@ load_node(#leaf_list{name = Name, desc = Desc, type = Type, config = Config0} = 
 %% Load records whose `config` flags are already resolved (YANG compiler).
 load_resolved(Prefix, Nodes, Callback) ->
     load_nodes_resolved(Prefix, Nodes, Callback).
+
+%% Insert compiled nodes as children of an existing schema path (remote augment).
+load_resolved_at(Prefix, ParentPath, Nodes, Callback) ->
+    case ets:lookup(mgmtd_commands, {ParentPath, Prefix}) of
+        [] ->
+            {error, {augment_target_missing, ParentPath, Prefix}};
+        [_] ->
+            Rev = lists:reverse(ParentPath),
+            lists:foreach(fun(Child) ->
+                                  load_node_resolved(Child, Rev, Prefix, Callback)
+                          end, Nodes),
+            ok
+    end.
 
 load_nodes_resolved(?DEFAULT_NS, Nodes, Callback) ->
     lists:foreach(fun(Child) ->

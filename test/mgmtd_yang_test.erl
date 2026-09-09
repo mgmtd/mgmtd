@@ -213,6 +213,87 @@ yang_txn_set_commit_test() ->
         mgmtd_cfg_db:remove_db(Db, [{backend, mnesia}])
     end.
 
+choice_flatten_test() ->
+    {ok, #{nodes := Nodes}} =
+        mgmtd_schema_yang:compile_file("test/yang/example-choice.yang"),
+    #container{name = "link", children = Link} =
+        lists:keyfind("link", #container.name, Nodes),
+    Children = Link(),
+    Names = lists:sort(leaf_names(Children)),
+    ?assertEqual(["eth-name", "other", "vpi"], Names),
+    #leaf{opts = EthOpts} = lists:keyfind("eth-name", #leaf.name, Children),
+    ?assertEqual("type", proplists:get_value(choice, EthOpts)),
+    ?assertEqual("ethernet", proplists:get_value('case', EthOpts)),
+    ?assertEqual("ethernet", proplists:get_value(choice_default, EthOpts)),
+    #leaf{opts = OtherOpts} = lists:keyfind("other", #leaf.name, Children),
+    ?assertEqual("other", proplists:get_value('case', OtherOpts)).
+
+identity_compile_test() ->
+    {ok, #{identities := Ids, nodes := Nodes}} =
+        mgmtd_schema_yang:compile_file("test/yang/example-identity.yang"),
+    Locals = lists:sort([binary_to_list(maps:get(local, I)) || I <- Ids]),
+    ?assertEqual(["blue", "car", "colour", "red"], Locals),
+    #container{children = Paint} =
+        lists:keyfind("paint", #container.name, Nodes),
+    #leaf{type = {identityref, Base}} =
+        lists:keyfind("colour", #leaf.name, Paint()),
+    ?assertEqual("example-identity:colour", Base).
+
+local_augment_test() ->
+    {ok, #{nodes := Nodes}} =
+        mgmtd_schema_yang:compile_file("test/yang/example-augment-local.yang"),
+    #container{children = Ifs} =
+        lists:keyfind("interfaces", #container.name, Nodes),
+    #list{children = Item} =
+        lists:keyfind("interface", #list.name, Ifs()),
+    Names = lists:sort([name(N) || N <- Item()]),
+    ?assertEqual(["enabled", "name"], Names),
+    #leaf{name = "enabled", type = boolean, default = true} =
+        lists:keyfind("enabled", #leaf.name, Item()).
+
+uses_augment_test() ->
+    {ok, #{nodes := Nodes}} =
+        mgmtd_schema_yang:compile_file("test/yang/example-uses-augment.yang"),
+    #container{children = C} =
+        lists:keyfind("c", #container.name, Nodes),
+    #container{name = "target", children = T} =
+        lists:keyfind("target", #container.name, C()),
+    Names = lists:sort(leaf_names(T())),
+    ?assertEqual(["a", "b"], Names).
+
+remote_augment_load_test() ->
+    start_mgmtd(),
+    lists:foreach(fun mgmtd:remove_schema/1, mgmtd:registered_schemas()),
+    ok = mgmtd:load_yang_module("test/yang/example-base.yang"),
+    ok = mgmtd:load_yang_module("test/yang/example-remote-aug.yang"),
+    #{node_type := leaf, type := uint8, default := 1} =
+        mgmtd_schema:lookup(["base", "root", "y"]),
+    #{node_type := leaf, type := string} =
+        mgmtd_schema:lookup(["base", "root", "x"]),
+    ok = mgmtd:remove_schema(base),
+    ok = mgmtd:remove_schema(ra).
+
+identityref_cast_test() ->
+    start_mgmtd(),
+    lists:foreach(fun mgmtd:remove_schema/1, mgmtd:registered_schemas()),
+    Db = "test_db_yang_id",
+    ok = mgmtd_cfg_db:remove_db(Db, [{backend, mnesia}]),
+    ok = mgmtd:load_yang_module("test/yang/example-identity.yang"),
+    ok = mgmtd_cfg_db:init(Db, [{backend, mnesia}]),
+    try
+        {ok, Path} = mgmtd_schema:lookup_path(
+                       ["idn", "paint", "colour", "red"]),
+        {ok, Txn} = mgmtd:txn_set(mgmtd:txn_new(), Path),
+        {ok, _} = mgmtd:txn_commit(Txn),
+        ?assertEqual({ok, "red"}, mgmtd:lookup(["idn", "paint", "colour"])),
+        {ok, Path2} = mgmtd_schema:lookup_path(
+                        ["idn", "paint", "colour", "car"]),
+        {error, _} = mgmtd:txn_set(mgmtd:txn_new(), Path2)
+    after
+        mgmtd:remove_schema(idn),
+        mgmtd_cfg_db:remove_db(Db, [{backend, mnesia}])
+    end.
+
 must_and_when_stored_on_opts_test() ->
     Yang = <<"
         module m {

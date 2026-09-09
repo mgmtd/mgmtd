@@ -36,6 +36,10 @@
                    | {enumeration, [enum_member()]}
                    | 'inet:ip-address'
                    | 'inet:port-number'
+                   | {identityref, string()}
+                   | {leafref, string()}
+                   | {union, list()}
+                   | {bits, list()}
                    | {Mod :: atom(), Type :: term()}.
 
 -export_type([data_type/0, enum_member/0]).

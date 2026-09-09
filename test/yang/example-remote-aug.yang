@@ -1,0 +1,15 @@
+module example-remote-aug {
+  namespace "urn:example:remote-aug";
+  prefix ra;
+
+  import example-base {
+    prefix base;
+  }
+
+  augment /base:root {
+    leaf y {
+      type uint8;
+      default 1;
+    }
+  }
+}

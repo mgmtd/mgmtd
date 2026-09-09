@@ -1,0 +1,22 @@
+module example-uses-augment {
+  namespace "urn:example:uses-aug";
+  prefix ua;
+
+  grouping endpoint {
+    container target {
+      leaf a {
+        type string;
+      }
+    }
+  }
+
+  container c {
+    uses endpoint {
+      augment target {
+        leaf b {
+          type uint8;
+        }
+      }
+    }
+  }
+}

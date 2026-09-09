@@ -1,0 +1,21 @@
+module example-identity {
+  namespace "urn:example:identity";
+  prefix idn;
+
+  identity colour;
+  identity red {
+    base colour;
+  }
+  identity blue {
+    base colour;
+  }
+  identity car;
+
+  container paint {
+    leaf colour {
+      type identityref {
+        base colour;
+      }
+    }
+  }
+}

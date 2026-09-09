@@ -13,6 +13,7 @@
 -export([remove_schema/0, remove_schema/1]).
 -export([prepare_load/3, register_schema/1, register_schema/3,
          unregister_schema/1, registered_schemas/0]).
+-export([register_identities/1, identities/0, identity_derived_from/2]).
 -export([prefix_container/2, mark_has_list_descendent/2]).
 -export([lookup/1, lookup/2, get_default/1, get_default/2]).
 -export([lookup_path/1]).
@@ -144,8 +145,83 @@ unregister_schema(Name) ->
         Current ->
             Rest = [I || #{prefix := P} = I <- Current, P =/= Name],
             true = ets:insert(mgmtd_meta, {loaded_schemas, Rest}),
+            drop_identities(Name),
             ok
     end.
+
+register_identities([]) ->
+    ok;
+register_identities(List) when is_list(List) ->
+    Map1 = lists:foldl(fun add_identity/2, identity_map(), List),
+    true = ets:insert(mgmtd_meta, {yang_identities, Map1}),
+    ok.
+
+identities() ->
+    identity_map().
+
+identity_derived_from(Name, Base) ->
+    Map = identity_map(),
+    case maps:size(Map) of
+        0 ->
+            true;
+        _ ->
+            case {find_identity(Name, Map), find_identity(Base, Map)} of
+                {error, _} ->
+                    false;
+                {{ok, _Id}, error} ->
+                    true;
+                {{ok, Id}, {ok, BaseId}} ->
+                    derived_from(Id, maps:get(qname, BaseId), Map, #{})
+            end
+    end.
+
+add_identity(#{local := Local, prefix := Pfx, qname := QN} = Id, Map) ->
+    PfxLocal = <<Pfx/binary, $:, Local/binary>>,
+    Map#{Local => Id, QN => Id, PfxLocal => Id}.
+
+find_identity(Name, Map) ->
+    maps:find(ioutil_bin(Name), Map).
+
+ioutil_bin(B) when is_binary(B) -> B;
+ioutil_bin(L) when is_list(L) -> list_to_binary(L);
+ioutil_bin(A) when is_atom(A) -> atom_to_binary(A, utf8).
+
+derived_from(Id, BaseQN, Map, Seen) ->
+    QN = maps:get(qname, Id),
+    case maps:is_key(QN, Seen) of
+        true ->
+            false;
+        false when QN =:= BaseQN ->
+            true;
+        false ->
+            Seen1 = Seen#{QN => true},
+            lists:any(
+              fun(B) ->
+                      BQN = ioutil_bin(B),
+                      BQN =:= BaseQN orelse
+                          case maps:find(BQN, Map) of
+                              {ok, Parent} -> derived_from(Parent, BaseQN, Map, Seen1);
+                              error -> false
+                          end
+              end, maps:get(bases, Id, []))
+    end.
+
+identity_map() ->
+    case ets:info(mgmtd_meta) of
+        undefined ->
+            #{};
+        _ ->
+            case ets:lookup(mgmtd_meta, yang_identities) of
+                [] -> #{};
+                [{_, Map}] -> Map
+            end
+    end.
+
+drop_identities(Prefix) ->
+    PfxBin = atom_to_binary(Prefix, utf8),
+    Map = maps:filter(fun(_K, #{prefix := P}) -> P =/= PfxBin end, identity_map()),
+    true = ets:insert(mgmtd_meta, {yang_identities, Map}),
+    ok.
 
 registered_schemas() ->
     [P || #{prefix := P} <- schema_infos()].
@@ -607,7 +683,8 @@ cast('inet:ip-address', Token) -> cast_ip_address(Token);
 cast({union, _Types}, _Token) -> {error, "union types are not supported yet"};
 cast({bits, _Bits}, _Token) -> {error, "bits types are not supported yet"};
 cast({leafref, _Path}, _Token) -> {error, "leafref types are not supported yet"};
-cast({identityref, _Base}, _Token) -> {error, "identityref types are not supported yet"};
+cast({identityref, Base}, Token) ->
+    cast_identityref(Base, Token);
 cast({Mod, Type}, Token) when is_atom(Mod) ->
     case is_yang_constructor(Mod) of
         true ->
@@ -704,4 +781,32 @@ cast_ip_address(Token) ->
     case inet:parse_address(Token) of
         {ok, _} = Ok -> Ok;
         {error, _Err} -> {error, "Invalid IP Address"}
+    end.
+
+cast_identityref(_Base, Token) ->
+    case identity_token(Token) of
+        {error, _} = Err ->
+            Err;
+        S ->
+            case identity_syntax(S) of
+                false ->
+                    {error, "Invalid identityref"};
+                true ->
+                    case identity_derived_from(S, _Base) of
+                        true -> {ok, S};
+                        false -> {error, "Identity not derived from base"}
+                    end
+            end
+    end.
+
+identity_token(B) when is_binary(B) -> binary_to_list(B);
+identity_token(A) when is_atom(A) -> atom_to_list(A);
+identity_token(L) when is_list(L) -> L;
+identity_token(_) -> {error, "Invalid identityref"}.
+
+identity_syntax(S) ->
+    case re:run(S, "^[A-Za-z_][A-Za-z0-9._-]*(:[A-Za-z_][A-Za-z0-9._-]*)?$",
+                [{capture, none}]) of
+        match -> true;
+        nomatch -> false
     end.

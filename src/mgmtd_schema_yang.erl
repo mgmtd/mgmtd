@@ -1,7 +1,6 @@
 %% Load RFC 7950 YANG modules into mgmtd schema ETS.
 %%
-%% PR 2: import/include, search_path, typedefs across modules,
-%% grouping/uses/refine, if-feature filtering.
+%% PR 3: augment (local, uses, remote), identity/identityref, choice/case flatten.
 -module(mgmtd_schema_yang).
 
 -export([load_file/1, load_file/2]).
@@ -15,7 +14,9 @@
                             prefix := atom(),
                             namespace := string(),
                             yang_version := binary() | atom(),
-                            nodes := [#container{} | #list{} | #leaf{} | #leaf_list{}]}.
+                            nodes := [#container{} | #list{} | #leaf{} | #leaf_list{}],
+                            identities => [map()],
+                            remote_augments => [map()]}.
 
 -spec load_file(file:filename()) -> ok | {error, term()}.
 load_file(File) ->
@@ -65,17 +66,25 @@ compile([{module, _Ln, Name0, Body}], Opts) ->
                     case data_nodes(Merged, Ctx1) of
                         {error, _} = Err ->
                             Err;
-                        {ok, Nodes} ->
+                        {ok, Nodes0} ->
                             PrefixAtom = maps:get(prefix, Opts, maps:get(prefix, Header)),
                             NsUri = case maps:get(namespace, Opts, undefined) of
                                         undefined -> maps:get(namespace, Header);
                                         Override -> Override
                                     end,
-                            {ok, #{module => Name,
-                                   prefix => PrefixAtom,
-                                   namespace => NsUri,
-                                   yang_version => maps:get(yang_version, Header, <<"1">>),
-                                   nodes => Nodes}}
+                            Ids = maps:get(identities, Ctx1, []),
+                            case apply_top_augments(Merged, Nodes0, Ctx1) of
+                                {error, _} = Err ->
+                                    Err;
+                                {ok, Nodes, Remote} ->
+                                    {ok, #{module => Name,
+                                           prefix => PrefixAtom,
+                                           namespace => NsUri,
+                                           yang_version => maps:get(yang_version, Header, <<"1">>),
+                                           nodes => Nodes,
+                                           identities => Ids,
+                                           remote_augments => Remote}}
+                            end
                     end
             end
     end;
@@ -153,14 +162,22 @@ header(Body) ->
                    yang_version => Ver}}
     end.
 
-load_compiled(#{prefix := Prefix, namespace := NsUri, nodes := Nodes}, Opts) ->
+load_compiled(Compiled, Opts) ->
+    #{prefix := Prefix, namespace := NsUri, nodes := Nodes} = Compiled,
     LoadOpts = Opts#{prefix => Prefix, namespace => NsUri},
     TopNames = [node_name(N) || N <- Nodes],
     case mgmtd_schema:prepare_load(LoadOpts, yang, TopNames) of
         {ok, Prefix1, Namespace} ->
             Callback = maps:get(callback, Opts, undefined),
-            ok = mgmtd_schema_function:load_resolved(Prefix1, Nodes, Callback),
-            mgmtd_schema:register_schema(Prefix1, Namespace, yang);
+            case Nodes of
+                [] ->
+                    ok;
+                _ ->
+                    ok = mgmtd_schema_function:load_resolved(Prefix1, Nodes, Callback)
+            end,
+            ok = mgmtd_schema:register_schema(Prefix1, Namespace, yang),
+            ok = mgmtd_schema:register_identities(maps:get(identities, Compiled, [])),
+            apply_remote_augments(maps:get(remote_augments, Compiled, []), Callback);
         {error, _} = Err ->
             Err
     end.
@@ -178,9 +195,13 @@ prepare_module(Body, Ctx0) ->
                 {error, _} = Err ->
                     Err;
                 {ok, Imports, Ctx2} ->
+                    Ids = collect_identities(Merged, maps:get(module, Ctx2),
+                                             maps:get(mod_prefix, Ctx2), Imports)
+                        ++ imported_identities(Imports),
                     Ctx3 = Ctx2#{imports => Imports,
                                  typedefs => collect_typedefs_here(Merged),
-                                 groupings => collect_groupings_here(Merged)},
+                                 groupings => collect_groupings_here(Merged),
+                                 identities => Ids},
                     {ok, Merged, Ctx3}
             end
     end.
@@ -285,11 +306,13 @@ finish_mod(Kind, Name, Body, Header, Key, Ctx) ->
                 {error, _} = Err ->
                     Err;
                 {ok, Imports, Ctx2} ->
+                    ModPrefix = maps:get(prefix_bin, Header),
                     Mod = #{kind => Kind,
                             name => Name,
-                            prefix => maps:get(prefix_bin, Header),
+                            prefix => ModPrefix,
                             typedefs => collect_typedefs_here(Merged),
                             groupings => collect_groupings_here(Merged),
+                            identities => collect_identities(Merged, Name, ModPrefix, Imports),
                             features => [arg_bin(A) || {feature, _, A, _} <- Merged],
                             imports => Imports,
                             body => Merged},
@@ -351,10 +374,18 @@ data_nodes([{uses, Ln, Arg, UsesSub} | Rest], Ctx, Acc) ->
         skip ->
             data_nodes(Rest, Ctx, Acc)
     end;
-data_nodes([{augment, Ln, Arg, _} | _], _Ctx, _Acc) ->
-    {error, {Ln, unsupported_statement, augment, arg_str(Arg)}};
-data_nodes([{choice, Ln, Arg, _} | _], _Ctx, _Acc) ->
-    {error, {Ln, unsupported_statement, choice, arg_str(Arg)}};
+data_nodes([{augment, _Ln, _Arg, _Sub} | Rest], Ctx, Acc) ->
+    %% Applied after the tree is built (top-level) or after uses expansion.
+    data_nodes(Rest, Ctx, Acc);
+data_nodes([{choice, Ln, Arg, Sub} | Rest], Ctx, Acc) ->
+    case flatten_choice(Ln, Arg, Sub, Ctx) of
+        {error, _} = Err ->
+            Err;
+        {ok, Nodes} ->
+            data_nodes(Rest, Ctx, lists:reverse(Nodes) ++ Acc);
+        skip ->
+            data_nodes(Rest, Ctx, Acc)
+    end;
 data_nodes([{Stmt, Ln, Arg, Sub} | Rest], Ctx, Acc)
   when Stmt =:= container; Stmt =:= list; Stmt =:= leaf; Stmt =:= 'leaf-list' ->
     case compile_node(Stmt, Ln, Arg, Sub, Ctx) of
@@ -373,34 +404,34 @@ expand_uses(Ln, Arg, UsesSub, Ctx) ->
         false ->
             skip;
         true ->
-            case lists:keyfind(augment, 1, UsesSub) of
-                {augment, ALn, AArg, _} ->
-                    {error, {ALn, unsupported_statement, augment, arg_str(AArg)}};
-                false ->
-                    GName = arg_bin(Arg),
-                    case lookup_grouping(GName, Ctx) of
-                        error ->
-                            {error, {Ln, unknown_grouping, arg_str(Arg)}};
-                        {ok, GBody, GCtx0} ->
-                            Stack = maps:get(uses_stack, Ctx, []),
-                            case lists:member(GName, Stack) of
-                                true ->
-                                    {error, {Ln, circular_uses, arg_str(Arg)}};
-                                false ->
-                                    GCtx = GCtx0#{parent_config => maps:get(parent_config, Ctx),
-                                                  uses_stack => [GName | Stack],
-                                                  features => maps:get(features, Ctx)},
-                                    case data_nodes(GBody, GCtx) of
+            GName = arg_bin(Arg),
+            case lookup_grouping(GName, Ctx) of
+                error ->
+                    {error, {Ln, unknown_grouping, arg_str(Arg)}};
+                {ok, GBody, GCtx0} ->
+                    Stack = maps:get(uses_stack, Ctx, []),
+                    case lists:member(GName, Stack) of
+                        true ->
+                            {error, {Ln, circular_uses, arg_str(Arg)}};
+                        false ->
+                            GCtx = GCtx0#{parent_config => maps:get(parent_config, Ctx),
+                                          uses_stack => [GName | Stack],
+                                          features => maps:get(features, Ctx)},
+                            case data_nodes(GBody, GCtx) of
+                                {error, _} = Err ->
+                                    Err;
+                                {ok, Nodes0} ->
+                                    Refines = [{refine, RLn, P, I}
+                                               || {refine, RLn, P, I} <- UsesSub],
+                                    case apply_refines(Nodes0, Refines) of
                                         {error, _} = Err ->
                                             Err;
-                                        {ok, Nodes0} ->
-                                            Refines = [{refine, RLn, P, I}
-                                                       || {refine, RLn, P, I} <- UsesSub],
-                                            case apply_refines(Nodes0, Refines) of
+                                        {ok, Nodes1} ->
+                                            case apply_uses_augments(UsesSub, Nodes1, Ctx) of
                                                 {error, _} = Err ->
                                                     Err;
-                                                {ok, Nodes1} ->
-                                                    {ok, propagate_uses_opts(Nodes1, UsesSub)}
+                                                {ok, Nodes2} ->
+                                                    {ok, propagate_uses_opts(Nodes2, UsesSub)}
                                             end
                                     end
                             end
@@ -647,6 +678,293 @@ add_opts(#leaf{opts = O} = N, Extra) -> N#leaf{opts = Extra ++ O};
 add_opts(#leaf_list{opts = O} = N, Extra) -> N#leaf_list{opts = Extra ++ O}.
 
 %%--------------------------------------------------------------------
+%% choice / case (flatten)
+%%--------------------------------------------------------------------
+
+flatten_choice(_Ln, Arg, Sub, Ctx) ->
+    case feature_ok(Sub, Ctx) of
+        false ->
+            skip;
+        true ->
+            ChoiceName = arg_str(Arg),
+            Default = case find_arg(default, Sub) of
+                          undefined -> undefined;
+                          D -> arg_str(D)
+                      end,
+            flatten_cases(Sub, ChoiceName, Default, Ctx, [])
+    end.
+
+flatten_cases([], _CN, _Def, _Ctx, Acc) ->
+    {ok, lists:reverse(Acc)};
+flatten_cases([{'case', _Ln, Name, CaseSub} | Rest], CN, Def, Ctx, Acc) ->
+    case feature_ok(CaseSub, Ctx) of
+        false ->
+            flatten_cases(Rest, CN, Def, Ctx, Acc);
+        true ->
+            case data_nodes(CaseSub, Ctx) of
+                {error, _} = Err ->
+                    Err;
+                {ok, Nodes} ->
+                    Tagged = [tag_choice(N, CN, arg_str(Name), Def) || N <- Nodes],
+                    flatten_cases(Rest, CN, Def, Ctx, lists:reverse(Tagged) ++ Acc)
+            end
+    end;
+flatten_cases([{Stmt, _, _, _} = S | Rest], CN, Def, Ctx, Acc)
+  when Stmt =:= container; Stmt =:= list; Stmt =:= leaf;
+       Stmt =:= 'leaf-list'; Stmt =:= choice; Stmt =:= uses ->
+    case data_nodes([S], Ctx) of
+        {error, _} = Err ->
+            Err;
+        {ok, []} ->
+            flatten_cases(Rest, CN, Def, Ctx, Acc);
+        {ok, Nodes} ->
+            CaseName = node_name(hd(Nodes)),
+            Tagged = [tag_choice(N, CN, CaseName, Def) || N <- Nodes],
+            flatten_cases(Rest, CN, Def, Ctx, lists:reverse(Tagged) ++ Acc)
+    end;
+flatten_cases([_Other | Rest], CN, Def, Ctx, Acc) ->
+    flatten_cases(Rest, CN, Def, Ctx, Acc).
+
+tag_choice(Node, ChoiceName, CaseName, Default) ->
+    Extra = [{choice, ChoiceName}, {'case', CaseName}]
+        ++ case Default of
+               undefined -> [];
+               _ -> [{choice_default, Default}]
+           end,
+    add_opts(Node, Extra).
+
+%%--------------------------------------------------------------------
+%% augment
+%%--------------------------------------------------------------------
+
+apply_top_augments(Body, Nodes, Ctx) ->
+    Augs = [{augment, Ln, Path, Sub} || {augment, Ln, Path, Sub} <- Body],
+    apply_augments(Augs, Nodes, Ctx, []).
+
+apply_uses_augments(UsesSub, Nodes, Ctx) ->
+    Augs = [{augment, Ln, Path, Sub} || {augment, Ln, Path, Sub} <- UsesSub],
+    case apply_augments(Augs, Nodes, Ctx#{augment_relative => true}, []) of
+        {ok, Nodes1, []} ->
+            {ok, Nodes1};
+        {ok, _Nodes1, [#{path := P, line := Ln} | _]} ->
+            {error, {Ln, absolute_augment_in_uses, P}};
+        Error ->
+            Error
+    end.
+
+apply_augments([], Nodes, _Ctx, Remote) ->
+    {ok, Nodes, lists:reverse(Remote)};
+apply_augments([{augment, Ln, Path, Sub} | Rest], Nodes, Ctx, Remote) ->
+    case feature_ok(Sub, Ctx) of
+        false ->
+            apply_augments(Rest, Nodes, Ctx, Remote);
+        true ->
+            case parse_schema_node_id(arg_str(Path)) of
+                {error, Reason} ->
+                    {error, {Ln, Reason, arg_str(Path)}};
+                {Kind, Steps} ->
+                    apply_one_augment(Kind, Steps, Ln, Path, Sub, Rest, Nodes, Ctx, Remote)
+            end
+    end.
+
+apply_one_augment(relative, Steps, Ln, Path, Sub, Rest, Nodes, Ctx, Remote) ->
+    case maps:get(augment_relative, Ctx, false) of
+        false ->
+            {error, {Ln, relative_augment_outside_uses, arg_str(Path)}};
+        true ->
+            graft_augment(Steps, Ln, Path, Sub, Rest, Nodes, Ctx, Remote)
+    end;
+apply_one_augment(absolute, Steps, Ln, Path, Sub, Rest, Nodes, Ctx, Remote) ->
+    case is_local_target(Steps, Ctx) of
+        true ->
+            graft_augment(Steps, Ln, Path, Sub, Rest, Nodes, Ctx, Remote);
+        false ->
+            case compile_augment_body(Sub, Ctx) of
+                {error, _} = Err ->
+                    Err;
+                {ok, Children} ->
+                    Remote1 = #{target => Steps, nodes => Children,
+                                line => Ln, path => arg_str(Path)},
+                    apply_augments(Rest, Nodes, Ctx, [Remote1 | Remote])
+            end
+    end.
+
+graft_augment(Steps, Ln, Path, Sub, Rest, Nodes, Ctx, Remote) ->
+    case compile_augment_body(Sub, Ctx) of
+        {error, _} = Err ->
+            Err;
+        {ok, Children} ->
+            Names = [Name || {_Pfx, Name} <- Steps],
+            case graft(Nodes, Names, Children, Ln, arg_str(Path)) of
+                {error, _} = Err ->
+                    Err;
+                {ok, Nodes1} ->
+                    apply_augments(Rest, Nodes1, Ctx, Remote)
+            end
+    end.
+
+compile_augment_body(Sub, Ctx) ->
+    case data_nodes(Sub, Ctx) of
+        {error, _} = Err ->
+            Err;
+        {ok, Nodes} ->
+            {ok, propagate_uses_opts(Nodes, Sub)}
+    end.
+
+is_local_target(Steps, Ctx) ->
+    Self = maps:get(mod_prefix, Ctx),
+    lists:all(fun({undefined, _}) -> true;
+                 ({Pfx, _}) -> Pfx =:= Self
+              end, Steps).
+
+parse_schema_node_id("/" ++ Rest) ->
+    case parse_sn_steps(Rest) of
+        {ok, []} -> {error, empty_schema_node_id};
+        {ok, Steps} -> {absolute, Steps};
+        Error -> Error
+    end;
+parse_schema_node_id(Path) ->
+    case parse_sn_steps(Path) of
+        {ok, []} -> {error, empty_schema_node_id};
+        {ok, Steps} -> {relative, Steps};
+        Error -> Error
+    end.
+
+parse_sn_steps(Path) ->
+    Parts = [P || P <- string:tokens(Path, "/"), P =/= ""],
+    {ok, [split_prefixed(P) || P <- Parts]}.
+
+split_prefixed(Part) ->
+    case string:split(Part, ":") of
+        [Pfx, Name] -> {list_to_binary(Pfx), Name};
+        [Name] -> {undefined, Name}
+    end.
+
+graft(_Nodes, [], _Extra, Ln, Path) ->
+    {error, {Ln, augment_not_found, Path}};
+graft(Nodes, [Name], Extra, Ln, Path) ->
+    case replace_named(Nodes, Name, fun(N) -> append_children(N, Extra, Ln, Path) end) of
+        {ok, _} = Ok -> Ok;
+        not_found -> {error, {Ln, augment_not_found, Path}}
+    end;
+graft(Nodes, [Name | Rest], Extra, Ln, Path) ->
+    case replace_named(Nodes, Name,
+                       fun(N) -> graft_into(N, Rest, Extra, Ln, Path) end) of
+        {ok, _} = Ok -> Ok;
+        not_found -> {error, {Ln, augment_not_found, Path}}
+    end.
+
+graft_into(#container{children = Ch} = N, Rest, Extra, Ln, Path) ->
+    case graft(Ch(), Rest, Extra, Ln, Path) of
+        {ok, Ch1} -> N#container{children = fun() -> Ch1 end};
+        Err -> Err
+    end;
+graft_into(#list{children = Ch} = N, Rest, Extra, Ln, Path) ->
+    case graft(Ch(), Rest, Extra, Ln, Path) of
+        {ok, Ch1} -> N#list{children = fun() -> Ch1 end};
+        Err -> Err
+    end;
+graft_into(_Other, _Rest, _Extra, Ln, Path) ->
+    {error, {Ln, augment_not_found, Path}}.
+
+append_children(#container{children = Ch} = N, Extra, _Ln, _Path) ->
+    N#container{children = fun() -> Ch() ++ Extra end};
+append_children(#list{children = Ch} = N, Extra, _Ln, _Path) ->
+    N#list{children = fun() -> Ch() ++ Extra end};
+append_children(_Other, _Extra, Ln, Path) ->
+    {error, {Ln, augment_not_a_data_node, Path}}.
+
+apply_remote_augments([], _Callback) ->
+    ok;
+apply_remote_augments([#{target := Steps, nodes := Nodes, line := Ln, path := Path} | Rest], Callback) ->
+    case remote_target(Steps) of
+        {error, Reason} ->
+            {error, {Ln, Reason, Path}};
+        {Prefix, ParentPath} ->
+            case mgmtd_schema_function:load_resolved_at(Prefix, ParentPath, Nodes, Callback) of
+                ok ->
+                    apply_remote_augments(Rest, Callback);
+                {error, _} = Err ->
+                    prepend_error(Err, Ln, Path)
+            end
+    end.
+
+remote_target([]) ->
+    {error, empty_schema_node_id};
+remote_target([{Pfx0, Name} | Rest]) ->
+    PfxBin = case Pfx0 of
+                 undefined -> <<>>;
+                 B -> B
+             end,
+    Prefix = prefix_atom(PfxBin),
+    Local = [Name | [N || {_P, N} <- Rest]],
+    case Prefix of
+        '' ->
+            {error, missing_augment_prefix};
+        _ ->
+            Path = case Prefix of
+                       default -> Local;
+                       _ -> [atom_to_list(Prefix) | Local]
+                   end,
+            {Prefix, Path}
+    end.
+
+%%--------------------------------------------------------------------
+%% identities
+%%--------------------------------------------------------------------
+
+collect_identities(Body, ModName, ModPrefix, Imports) ->
+    [begin
+         Local = arg_bin(Name),
+         Bases = [expand_id_ref(B, ModPrefix, ModName, Imports)
+                  || {base, _, B, _} <- Sub],
+         #{local => Local,
+           module => ModName,
+           prefix => ModPrefix,
+           qname => <<ModName/binary, $:, Local/binary>>,
+           bases => Bases}
+     end || {identity, _, Name, Sub} <- Body].
+
+imported_identities(Imports) ->
+    imported_identities(maps:values(Imports), #{}).
+
+imported_identities([], _Seen) ->
+    [];
+imported_identities([Imp | Rest], Seen) ->
+    Name = maps:get(name, Imp),
+    case maps:is_key(Name, Seen) of
+        true ->
+            imported_identities(Rest, Seen);
+        false ->
+            maps:get(identities, Imp, [])
+                ++ imported_identities(maps:values(maps:get(imports, Imp, #{})) ++ Rest,
+                                       Seen#{Name => true})
+    end.
+
+expand_id_ref(Arg, Ctx) when is_map(Ctx) ->
+    expand_id_ref(Arg, maps:get(mod_prefix, Ctx), maps:get(module, Ctx),
+                  maps:get(imports, Ctx)).
+
+expand_id_ref(undefined, _Pfx, _Mod, _Imports) ->
+    "";
+expand_id_ref(Arg, ModPrefix, ModName, Imports) ->
+    Bin = arg_bin(Arg),
+    case binary:split(Bin, <<":">>) of
+        [Local] ->
+            binary_to_list(<<ModName/binary, $:, Local/binary>>);
+        [Pfx, Local] when Pfx =:= ModPrefix ->
+            binary_to_list(<<ModName/binary, $:, Local/binary>>);
+        [Pfx, Local] ->
+            case maps:find(Pfx, Imports) of
+                {ok, Imp} ->
+                    ImpName = maps:get(name, Imp),
+                    binary_to_list(<<ImpName/binary, $:, Local/binary>>);
+                error ->
+                    binary_to_list(Bin)
+            end
+    end.
+
+%%--------------------------------------------------------------------
 %% Config, keys, cardinality
 %%--------------------------------------------------------------------
 
@@ -695,6 +1013,8 @@ resolve_type(Name, Sub, Ln, Ctx, Seen) ->
             {error, {Ln, circular_typedef, Name}};
         false ->
             case builtin_type(Name, Sub) of
+                {ok, {identityref_raw, Base}} ->
+                    {ok, {identityref, expand_id_ref(Base, Ctx)}};
                 {ok, _} = Ok ->
                     Ok;
                 unknown ->
@@ -808,7 +1128,7 @@ builtin_type(<<"decimal64">>, _) -> {ok, decimal64};
 builtin_type(<<"empty">>, _) -> {ok, empty};
 builtin_type(<<"enumeration">>, Sub) -> {ok, {enum, enums(Sub)}};
 builtin_type(<<"identityref">>, Sub) ->
-    {ok, {identityref, arg_str(find_arg(base, Sub))}};
+    {ok, {identityref_raw, find_arg(base, Sub)}};
 builtin_type(<<"instance-identifier">>, _) -> {ok, string};
 builtin_type(<<"int8">>, Sub) -> int_type(int8, Sub);
 builtin_type(<<"int16">>, Sub) -> int_type(int16, Sub);

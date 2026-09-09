@@ -1,0 +1,20 @@
+module example-augment-local {
+  namespace "urn:example:aug-local";
+  prefix al;
+
+  container interfaces {
+    list interface {
+      key "name";
+      leaf name {
+        type string;
+      }
+    }
+  }
+
+  augment /interfaces/interface {
+    leaf enabled {
+      type boolean;
+      default true;
+    }
+  }
+}

@@ -1,0 +1,10 @@
+module example-base {
+  namespace "urn:example:base";
+  prefix base;
+
+  container root {
+    leaf x {
+      type string;
+    }
+  }
+}
