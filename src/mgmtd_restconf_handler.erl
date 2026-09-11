@@ -1,5 +1,5 @@
 %%%-------------------------------------------------------------------
-%% @doc Cowboy handler for RESTCONF discovery and data GET.
+%% @doc Cowboy handler for RESTCONF discovery and data resources.
 %% @end
 %%%-------------------------------------------------------------------
 -module(mgmtd_restconf_handler).
@@ -27,21 +27,17 @@ handle(<<"GET">>, <<"/restconf/operations">>, Req) ->
     json_get(Req, fun() -> #{<<"ietf-restconf:operations">> => #{}} end);
 handle(<<"GET">>, <<"/restconf/operations/">>, Req) ->
     json_get(Req, fun() -> #{<<"ietf-restconf:operations">> => #{}} end);
-handle(<<"GET">>, Path, Req) ->
+handle(Method, Path, Req) ->
     case is_data_path(Path) of
         true ->
-            data_get(Path, Req);
+            data_method(Method, Path, Req);
+        false when Method =:= <<"GET">> ->
+            not_found(Req);
         false ->
-            not_found(Req)
-    end;
-handle(_Method, _Path, Req) ->
-    not_found(Req).
+            method_not_allowed(Req)
+    end.
 
-is_data_path(<<"/restconf/data">>) -> true;
-is_data_path(<<"/restconf/data/", _/binary>>) -> true;
-is_data_path(_) -> false.
-
-data_get(Path, Req) ->
+data_method(<<"GET">>, Path, Req) ->
     case negotiate(Req) of
         xml ->
             mgmtd_restconf_error:reply(
@@ -49,8 +45,18 @@ data_get(Path, Req) ->
               #{tag => <<"operation-not-supported">>,
                 message => <<"XML encoding not supported">>});
         json ->
-            mgmtd_restconf_data:get(Path, Req)
-    end.
+            mgmtd_restconf_data:http(<<"GET">>, Path, Req)
+    end;
+data_method(Method, Path, Req)
+  when Method =:= <<"PUT">>; Method =:= <<"POST">>;
+       Method =:= <<"PATCH">>; Method =:= <<"DELETE">> ->
+    mgmtd_restconf_data:http(Method, Path, Req);
+data_method(_Method, _Path, Req) ->
+    method_not_allowed(Req).
+
+is_data_path(<<"/restconf/data">>) -> true;
+is_data_path(<<"/restconf/data/", _/binary>>) -> true;
+is_data_path(_) -> false.
 
 host_meta(Req) ->
     Body = <<"<XRD xmlns='http://docs.oasis-open.org/ns/xri/xrd-1.0'>\n",
@@ -72,6 +78,9 @@ json_get(Req, Fun) ->
 
 not_found(Req) ->
     cowboy_req:reply(404, #{}, <<>>, Req).
+
+method_not_allowed(Req) ->
+    cowboy_req:reply(405, #{<<"allow">> => <<"GET">>}, <<>>, Req).
 
 %% JSON unless the client asked only for yang-data+xml.
 negotiate(Req) ->

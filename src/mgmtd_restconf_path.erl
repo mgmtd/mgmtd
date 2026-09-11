@@ -8,7 +8,7 @@
 %%%-------------------------------------------------------------------
 -module(mgmtd_restconf_path).
 
--export([parse/1]).
+-export([parse/1, data_uri/1]).
 
 -include("mgmtd_schema.hrl").
 
@@ -177,6 +177,58 @@ key_error(Name, Reason) when is_list(Reason) ->
     "invalid key " ++ Name ++ ": " ++ Reason;
 key_error(Name, Reason) ->
     lists:flatten(io_lib:format("invalid key ~s: ~p", [Name, Reason])).
+
+-spec data_uri(map()) -> binary().
+data_uri(#{module := Module, prefix := Prefix, item_path := Path}) ->
+    Local = strip_prefix(Prefix, Path),
+    iolist_to_binary(["/restconf/data/", format_local(Module, Local)]).
+
+strip_prefix(?DEFAULT_NS, Path) ->
+    Path;
+strip_prefix(Prefix, [Name | Rest] = Path) ->
+    case atom_to_list(Prefix) of
+        Name -> Rest;
+        _ -> Path
+    end;
+strip_prefix(_Prefix, Path) ->
+    Path.
+
+format_local(_Module, []) ->
+    [];
+format_local(Module, [Name | Rest]) when is_list(Name) ->
+    format_more(Rest, [Module, $:, Name]).
+
+format_more([], Acc) ->
+    Acc;
+format_more([Key | Rest], Acc) when is_tuple(Key) ->
+    format_more(Rest, [Acc, $=, join_keys(Key)]);
+format_more([Name | Rest], Acc) when is_list(Name) ->
+    format_more(Rest, [Acc, $/, Name]).
+
+join_keys(Key) ->
+    Parts = [percent_encode(key_part(P)) || P <- tuple_to_list(Key)],
+    lists:join($,, Parts).
+
+key_part(S) when is_list(S) ->
+    S;
+key_part(N) when is_integer(N) ->
+    integer_to_list(N);
+key_part(T) when is_tuple(T), tuple_size(T) =:= 4; tuple_size(T) =:= 8 ->
+    inet:ntoa(T);
+key_part(B) when is_binary(B) ->
+    binary_to_list(B);
+key_part(A) when is_atom(A) ->
+    atom_to_list(A).
+
+percent_encode(Str) ->
+    lists:flatten([pct_char(C) || C <- Str]).
+
+pct_char(C) when C >= $a, C =< $z -> C;
+pct_char(C) when C >= $A, C =< $Z -> C;
+pct_char(C) when C >= $0, C =< $9 -> C;
+pct_char(C) when C =:= $-; C =:= $.; C =:= $_; C =:= $~ -> C;
+pct_char(C) ->
+    io_lib:format("%~2.16.0B", [C]).
 
 prefix_base(?DEFAULT_NS) ->
     [];

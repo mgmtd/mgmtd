@@ -8,7 +8,7 @@
 %%%-------------------------------------------------------------------
 -module(mgmtd_restconf_json).
 
--export([encode/2]).
+-export([encode/2, decode/3, exists/1]).
 
 -include("mgmtd_schema.hrl").
 
@@ -303,3 +303,353 @@ not_found() ->
     #{tag => <<"invalid-value">>,
       http => 404,
       message => <<"data resource not found">>}.
+
+%%--------------------------------------------------------------------
+%% Exists / decode (writes)
+%%--------------------------------------------------------------------
+
+-spec exists(map()) -> boolean().
+exists(#{schema := #{node_type := list} = Schema, item_path := Path}) ->
+    instance_exists(Path, Schema);
+exists(#{schema := #{node_type := leaf} = Schema, item_path := Path}) ->
+    read_leaf(Path, Schema) =/= none;
+exists(#{schema := #{node_type := leaf_list} = Schema, item_path := Path}) ->
+    case lists:last(Path) of
+        {Val} ->
+            leaf_list_has(Path, Schema, Val);
+        _ ->
+            read_leaf_list(Path, Schema) =/= []
+    end;
+exists(#{schema := #{node_type := container}}) ->
+    true;
+exists(_) ->
+    false.
+
+%% decode(Parsed, JsonMap, put|post|patch) -> {ok, Ops, CreatedPath} | {error, map()}
+%% Ops = [{set, item_path(), term()} | {delete, item_path()}]
+-spec decode(map(), map(), put | post | patch) ->
+          {ok, list(), map()} | {error, map()}.
+decode(Parsed, Body, Mode) when is_map(Body) ->
+    try decode1(Parsed, Body, Mode) of
+        {Ops, Created} ->
+            {ok, Ops, Created}
+    catch
+        throw:{restconf_error, Err} ->
+            {error, Err}
+    end;
+decode(_Parsed, _Body, _Mode) ->
+    {error, #{tag => <<"malformed-message">>,
+              http => 400,
+              message => <<"request body must be a JSON object">>}}.
+
+decode1(#{schema := #{config := false}}, _Body, _Mode) ->
+    err(405, <<"operation-not-supported">>,
+        <<"cannot write operational data">>);
+decode1(#{schema := #{node_type := Type, name := Name} = Schema,
+          item_path := Path, module := Module} = Parsed, Body, Mode) ->
+    Inner = unwrap(Body, Module, Name, Type, Mode),
+    case {Type, Mode, lists:last(Path)} of
+        {list, post, Last} when not is_tuple(Last) ->
+            decode_post_list(Path, Schema, Module, Inner);
+        {list, put, Key} when is_tuple(Key) ->
+            decode_put_instance(Parsed, Schema, Module, Inner);
+        {list, patch, Key} when is_tuple(Key) ->
+            decode_patch_instance(Parsed, Schema, Module, Inner);
+        {leaf, Mode2, _} when Mode2 =/= post ->
+            Val = from_json(maps:get(type, Schema), Inner),
+            {[{set, Path, Val}], Parsed};
+        {leaf_list, post, Last} when not is_tuple(Last) ->
+            decode_post_leaf_list(Path, Schema, Module, Inner, Parsed);
+        {leaf_list, Mode2, _} when Mode2 =/= post ->
+            Val = from_json_list(maps:get(type, Schema), Inner),
+            {[{set, Path, Val}], Parsed};
+        {container, post, _} ->
+            decode_post_container(Path, Schema, Module, Inner, Parsed);
+        {container, put, _} ->
+            Ops = decode_object(Path, Module, Inner, []),
+            {lists:reverse(Ops), Parsed};
+        {container, patch, _} ->
+            Ops = decode_patch_object(Path, Module, Inner, []),
+            {lists:reverse(Ops), Parsed};
+        {list, put, Last} when not is_tuple(Last) ->
+            err(405, <<"operation-not-supported">>,
+                <<"PUT the list instance, not the list">>);
+        _ ->
+            err(405, <<"operation-not-supported">>,
+                <<"method not allowed on this resource">>)
+    end.
+
+unwrap(Body, Module, Name, Type, Mode) ->
+    Q = qname(Module, Name),
+    N = list_to_binary(Name),
+    case {maps:is_key(Q, Body), maps:is_key(N, Body)} of
+        {true, _} ->
+            unwrap_value(maps:get(Q, Body), Type, Mode);
+        {false, true} ->
+            unwrap_value(maps:get(N, Body), Type, Mode);
+        {false, false} ->
+            err(400, <<"malformed-message">>,
+                "missing " ++ binary_to_list(Q) ++ " in request body")
+    end.
+
+unwrap_value(Val, list, post) ->
+    to_item_list(Val);
+unwrap_value(Val, list, put) ->
+    to_item_list(Val);
+unwrap_value(Val, list, patch) ->
+    to_item_list(Val);
+unwrap_value(Val, _Type, _Mode) ->
+    Val.
+
+to_item_list(List) when is_list(List) ->
+    List;
+to_item_list(Map) when is_map(Map) ->
+    [Map];
+to_item_list(_) ->
+    err(400, <<"malformed-message">>, <<"list body must be an object or array">>).
+
+decode_post_list(ListPath, Schema, Module, Items) ->
+    case Items of
+        [Item] when is_map(Item) ->
+            {InstPath, Ops} = decode_new_item(ListPath, Schema, Module, Item),
+            Created = #{module => Module,
+                        prefix => maps:get(ns, Schema, default),
+                        item_path => InstPath,
+                        schema => Schema},
+            {Ops, Created};
+        [_] ->
+            err(400, <<"malformed-message">>, <<"list item must be an object">>);
+        _ ->
+            err(400, <<"malformed-message">>,
+                <<"POST must create exactly one list item">>)
+    end.
+
+decode_put_instance(#{item_path := InstPath, prefix := Prefix,
+                      module := Module} = Parsed,
+                    Schema, Module, Items) ->
+    Item = one_item(Items),
+    {_Path, Sets} = decode_new_item(lists:droplast(InstPath), Schema, Module, Item,
+                                    lists:last(InstPath)),
+    {[{delete, InstPath} | Sets], Parsed#{prefix => Prefix}}.
+
+decode_patch_instance(#{item_path := InstPath, module := Module} = Parsed,
+                      _Schema, Module, Items) ->
+    Item = one_item(Items),
+    Ops = decode_patch_object(InstPath, Module, Item, []),
+    {lists:reverse(Ops), Parsed}.
+
+decode_post_leaf_list(Path, Schema, _Module, Val, Parsed) ->
+    case is_list(Val) of
+        true ->
+            Internals = from_json_list(maps:get(type, Schema), Val),
+            Existing = read_leaf_list(Path, Schema),
+            {[{set, Path, Existing ++ Internals}], Parsed};
+        false ->
+            Internal = from_json(maps:get(type, Schema), Val),
+            Existing = read_leaf_list(Path, Schema),
+            {[{set, Path, Existing ++ [Internal]}], Parsed}
+    end.
+
+decode_post_container(Path, _Schema, Module, Inner, Parsed) when is_map(Inner) ->
+    case maps:size(Inner) of
+        1 ->
+            Ops = decode_object(Path, Module, Inner, []),
+            {lists:reverse(Ops), Parsed};
+        _ ->
+            err(400, <<"malformed-message">>,
+                <<"POST to a container must create one child">>)
+    end;
+decode_post_container(_Path, _Schema, _Module, _Inner, _Parsed) ->
+    err(400, <<"malformed-message">>, <<"container body must be an object">>).
+
+one_item([Item]) when is_map(Item) ->
+    Item;
+one_item([_]) ->
+    err(400, <<"malformed-message">>, <<"list item must be an object">>);
+one_item(_) ->
+    err(400, <<"malformed-message">>, <<"expected one list item">>).
+
+decode_new_item(ListPath, Schema, Module, Item) ->
+    decode_new_item(ListPath, Schema, Module, Item, undefined).
+
+decode_new_item(ListPath, #{key_names := KeyNames} = Schema, Module, Item, UrlKey) ->
+    KeyStrs = key_tokens(ListPath, Schema, Item, UrlKey),
+    Config = maps:get(config, Schema, true),
+    Internals = [begin
+                     {ok, I} = case mgmtd_schema:lookup(ListPath ++ [KN]) of
+                                   #{type := Type} ->
+                                       mgmtd_schema:cast(Type, S);
+                                   _ ->
+                                       {ok, S}
+                               end,
+                     I
+                 end || {KN, S} <- lists:zip(KeyNames, KeyStrs)],
+    Key = case Config of
+              false -> list_to_tuple(Internals);
+              _ -> list_to_tuple(KeyStrs)
+          end,
+    InstPath = ListPath ++ [Key],
+    Sets = decode_object(InstPath, Module, Item, [{set, InstPath, undefined}]),
+    {InstPath, lists:reverse(Sets)}.
+
+key_tokens(ListPath, #{key_names := KeyNames}, Item, undefined) ->
+    [body_key_token(ListPath, KN, Item) || KN <- KeyNames];
+key_tokens(ListPath, #{key_names := KeyNames}, Item, UrlKey) when is_tuple(UrlKey) ->
+    UrlParts = [key_token_from_internal(P) || P <- tuple_to_list(UrlKey)],
+    lists:foreach(
+      fun({KN, UrlPart}) ->
+              case json_member(Item, KN) of
+                  error ->
+                      ok;
+                  {ok, JVal} ->
+                      #{type := Type} = mgmtd_schema:lookup(ListPath ++ [KN]),
+                      case key_token(Type, from_json(Type, JVal)) of
+                          UrlPart ->
+                              ok;
+                          _ ->
+                              err(400, <<"invalid-value">>,
+                                  <<"list keys in body do not match the URL">>)
+                      end
+              end
+      end, lists:zip(KeyNames, UrlParts)),
+    UrlParts.
+
+body_key_token(ListPath, KN, Item) ->
+    case json_member(Item, KN) of
+        {ok, JVal} ->
+            case mgmtd_schema:lookup(ListPath ++ [KN]) of
+                #{type := Type} ->
+                    key_token(Type, from_json(Type, JVal));
+                _ ->
+                    err(400, <<"invalid-value">>, "missing key leaf " ++ KN)
+            end;
+        error ->
+            err(400, <<"invalid-value">>, "missing list key " ++ KN)
+    end.
+
+json_member(Map, Name) ->
+    N = list_to_binary(Name),
+    case maps:find(N, Map) of
+        {ok, V} -> {ok, V};
+        error -> error
+    end.
+
+key_token(_Type, Val) when is_list(Val) ->
+    Val;
+key_token(_Type, Val) when is_integer(Val) ->
+    integer_to_list(Val);
+key_token(_Type, Val) when is_tuple(Val), tuple_size(Val) =:= 4;
+                           is_tuple(Val), tuple_size(Val) =:= 8 ->
+    inet:ntoa(Val);
+key_token(_Type, Val) when is_binary(Val) ->
+    binary_to_list(Val);
+key_token(_Type, Val) when is_atom(Val) ->
+    atom_to_list(Val).
+
+key_token_from_internal(Val) ->
+    key_token(string, Val).
+
+decode_object(_Path, _Module, Map, Acc) when map_size(Map) =:= 0 ->
+    Acc;
+decode_object(Path, Module, Map, Acc) ->
+    maps:fold(
+      fun(Key, Val, A) ->
+              Name = member_name(Key, Module),
+              Child = Path ++ [Name],
+              case mgmtd_schema:lookup(Child) of
+                  false ->
+                      err(400, <<"unknown-element">>,
+                          "unknown data node " ++ Name);
+                  Schema ->
+                      decode_child(Child, Schema, Module, Val, A)
+              end
+      end, Acc, Map).
+
+decode_patch_object(Path, Module, Map, Acc) ->
+    maps:fold(
+      fun(Key, null, A) ->
+              Name = member_name(Key, Module),
+              [{delete, Path ++ [Name]} | A];
+         (Key, Val, A) ->
+              Name = member_name(Key, Module),
+              Child = Path ++ [Name],
+              case mgmtd_schema:lookup(Child) of
+                  false ->
+                      err(400, <<"unknown-element">>,
+                          "unknown data node " ++ Name);
+                  Schema ->
+                      decode_child(Child, Schema, Module, Val, A)
+              end
+      end, Acc, Map).
+
+decode_child(Path, #{node_type := leaf} = Schema, _Module, Val, Acc) ->
+    [{set, Path, from_json(maps:get(type, Schema), Val)} | Acc];
+decode_child(Path, #{node_type := leaf_list} = Schema, _Module, Val, Acc) ->
+    [{set, Path, from_json_list(maps:get(type, Schema), Val)} | Acc];
+decode_child(Path, #{node_type := container}, Module, Val, Acc) when is_map(Val) ->
+    decode_object(Path, Module, Val, Acc);
+decode_child(Path, #{node_type := list} = Schema, Module, Val, Acc) ->
+    lists:foldl(
+      fun(Item, A) when is_map(Item) ->
+              {_Inst, Ops} = decode_new_item(Path, Schema, Module, Item),
+              Ops ++ A;
+         (_, _) ->
+              err(400, <<"malformed-message">>, <<"list item must be an object">>)
+      end, Acc, to_item_list(Val));
+decode_child(_Path, _Schema, _Module, _Val, _Acc) ->
+    err(400, <<"malformed-message">>, <<"invalid node value">>).
+
+member_name(Key, Module) when is_binary(Key) ->
+    case binary:split(Key, <<":">>) of
+        [Name] ->
+            binary_to_list(Name);
+        [Mod, Name] ->
+            case binary_to_list(Mod) of
+                Module ->
+                    binary_to_list(Name);
+                _ ->
+                    err(400, <<"unknown-element">>,
+                        "unexpected module " ++ binary_to_list(Mod))
+            end
+    end.
+
+from_json_list(Type, List) when is_list(List) ->
+    [from_json(Type, V) || V <- List];
+from_json_list(_Type, _) ->
+    err(400, <<"malformed-message">>, <<"leaf-list value must be a JSON array">>).
+
+from_json(_Type, null) ->
+    err(400, <<"invalid-value">>, <<"invalid leaf value">>);
+from_json(boolean, B) when is_boolean(B) ->
+    B;
+from_json(empty, [null]) ->
+    empty;
+from_json(empty, null) ->
+    empty;
+from_json(Type, B) when is_binary(B) ->
+    cast_or_err(Type, binary_to_list(B));
+from_json(Type, N) when is_integer(N) ->
+    cast_or_err(Type, N);
+from_json(Type, B) when is_boolean(B) ->
+    cast_or_err(Type, B);
+from_json(_Type, F) when is_float(F) ->
+    err(400, <<"invalid-value">>, <<"expected an integer value">>);
+from_json(_Type, _) ->
+    err(400, <<"invalid-value">>, <<"invalid leaf value">>).
+
+cast_or_err(Type, Token) ->
+    case mgmtd_schema:cast(Type, Token) of
+        {ok, Internal} ->
+            Internal;
+        {error, Reason} ->
+            err(400, <<"invalid-value">>, fmt_reason(Reason))
+    end.
+
+fmt_reason(S) when is_list(S) ->
+    S;
+fmt_reason(R) ->
+    lists:flatten(io_lib:format("~p", [R])).
+
+err(Http, Tag, Msg) ->
+    throw({restconf_error, #{http => Http, tag => Tag, message => Msg}}).
+

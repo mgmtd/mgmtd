@@ -642,19 +642,7 @@ cast_value(Path, Value) ->
                         Err
                 end;
             #{node_type := leaf_list, type := Type} = Last when is_list(Value) ->
-                lists:map(fun(Val) ->
-                                  case cast(Type, Val) of
-                                      {ok, InternalVal} ->
-                                          case check_pattern(Last, InternalVal) of
-                                              {ok, _} = Ok ->
-                                                  Ok;
-                                              Err ->
-                                                  throw(Err)
-                                          end;
-                                      Err ->
-                                          throw(Err)
-                                  end
-                          end, Value);
+                cast_leaf_list_values(Type, Last, Value, []);
             #{node_type := list, key_values := KVs} when KVs =/= [] ->
                 {ok, undefined};
             _ ->
@@ -662,6 +650,21 @@ cast_value(Path, Value) ->
         end
     catch error:Reason:_Trace ->
             {error, Reason}
+    end.
+
+cast_leaf_list_values(_Type, _Last, [], Acc) ->
+    {ok, lists:reverse(Acc)};
+cast_leaf_list_values(Type, Last, [Val | Rest], Acc) ->
+    case cast(Type, Val) of
+        {ok, Internal} ->
+            case check_pattern(Last, Internal) of
+                {ok, I} ->
+                    cast_leaf_list_values(Type, Last, Rest, [I | Acc]);
+                {error, _} = Err ->
+                    Err
+            end;
+        {error, _} = Err ->
+            Err
     end.
 
 %% Cast list-key leaf values according to each key leaf's schema type.
