@@ -20,7 +20,7 @@
 -export([lookup_path/1]).
 -export([children/1, children/2, children/3]).
 -export([split_item_path/1, cli_path/2]).
--export([cast_value/2, cast_list_key_values/1]).
+-export([cast_value/2, cast_list_key_values/1, cast/2]).
 -export([codec/1, data_callback/1, resolve_data_callback/3]).
 -export([ets_pat/1, ets_tail/1]).
 

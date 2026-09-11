@@ -1,5 +1,5 @@
 %%%-------------------------------------------------------------------
-%% @doc Cowboy handler for RESTCONF discovery and the data stub.
+%% @doc Cowboy handler for RESTCONF discovery and data GET.
 %% @end
 %%%-------------------------------------------------------------------
 -module(mgmtd_restconf_handler).
@@ -27,21 +27,30 @@ handle(<<"GET">>, <<"/restconf/operations">>, Req) ->
     json_get(Req, fun() -> #{<<"ietf-restconf:operations">> => #{}} end);
 handle(<<"GET">>, <<"/restconf/operations/">>, Req) ->
     json_get(Req, fun() -> #{<<"ietf-restconf:operations">> => #{}} end);
-handle(<<"GET">>, <<"/restconf/data/ietf-yang-library:modules-state">>, Req) ->
-    json_get(Req, fun mgmtd_restconf_yanglib:modules_state/0);
-handle(<<"GET">>, <<"/restconf/data">>, Req) ->
-    not_implemented(Req);
-handle(<<"GET">>, <<"/restconf/data/">>, Req) ->
-    not_implemented(Req);
 handle(<<"GET">>, Path, Req) ->
-    case binary:match(Path, <<"/restconf/data/">>) of
-        {0, _} ->
-            not_implemented(Req);
-        nomatch ->
+    case is_data_path(Path) of
+        true ->
+            data_get(Path, Req);
+        false ->
             not_found(Req)
     end;
 handle(_Method, _Path, Req) ->
     not_found(Req).
+
+is_data_path(<<"/restconf/data">>) -> true;
+is_data_path(<<"/restconf/data/", _/binary>>) -> true;
+is_data_path(_) -> false.
+
+data_get(Path, Req) ->
+    case negotiate(Req) of
+        xml ->
+            mgmtd_restconf_error:reply(
+              Req, 406,
+              #{tag => <<"operation-not-supported">>,
+                message => <<"XML encoding not supported">>});
+        json ->
+            mgmtd_restconf_data:get(Path, Req)
+    end.
 
 host_meta(Req) ->
     Body = <<"<XRD xmlns='http://docs.oasis-open.org/ns/xri/xrd-1.0'>\n",
@@ -60,12 +69,6 @@ json_get(Req, Fun) ->
               #{tag => <<"operation-not-supported">>,
                 message => <<"XML encoding not supported">>})
     end.
-
-not_implemented(Req) ->
-    mgmtd_restconf_error:reply(
-      Req, 501,
-      #{tag => <<"operation-not-supported">>,
-        message => <<"RESTCONF data resource not implemented">>}).
 
 not_found(Req) ->
     cowboy_req:reply(404, #{}, <<>>, Req).

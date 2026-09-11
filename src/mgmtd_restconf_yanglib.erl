@@ -9,7 +9,8 @@
 -module(mgmtd_restconf_yanglib).
 
 -export([yang_library_revision/0, module_set_id/0, modules/0,
-         modules_state/0, api_root/0, yang_library_version/0]).
+         modules_state/0, api_root/0, yang_library_version/0,
+         find_module/1]).
 
 -include("mgmtd_schema.hrl").
 
@@ -55,12 +56,21 @@ api_root() ->
 yang_library_version() ->
     #{<<"ietf-restconf:yang-library-version">> => bin(?YANGLIB_REV)}.
 
+-spec find_module(string()) -> {ok, map()} | error.
+find_module(Name) when is_list(Name) ->
+    case [M || M <- modules(), maps:get(name, M) =:= Name] of
+        [M] ->
+            {ok, M};
+        _ ->
+            error
+    end.
+
 schema_to_module(#{prefix := Prefix, module := Module,
                    namespace := URI, source := Source} = Info) ->
     #{name => Module,
       revision => revision(maps:get(revision, Info, undefined)),
       namespace => URI,
-      prefix => atom_to_list(Prefix),
+      prefix => Prefix,
       source => Source,
       conformance_type => implement}.
 
@@ -68,13 +78,13 @@ builtins() ->
     [#{name => "ietf-yang-library",
        revision => ?YANGLIB_REV,
        namespace => ?YANGLIB_NS,
-       prefix => "yanglib",
+       prefix => yanglib,
        source => builtin,
        conformance_type => implement},
      #{name => "ietf-restconf",
        revision => ?RESTCONF_REV,
        namespace => ?RESTCONF_NS,
-       prefix => "rc",
+       prefix => rc,
        source => builtin,
        conformance_type => implement}].
 

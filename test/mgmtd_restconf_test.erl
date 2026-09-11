@@ -16,7 +16,7 @@ listener_test_() ->
       fun yang_library_version/0,
       fun modules_state_includes_builtins/0,
       fun operations_is_empty/0,
-      fun data_root_not_implemented/0,
+      fun data_root_has_yang_library/0,
       fun xml_accept_is_not_acceptable/0,
       fun unknown_path_is_not_found/0]}.
 
@@ -76,13 +76,13 @@ operations_is_empty() ->
     ?assertEqual(200, Code),
     ?assertEqual(#{<<"ietf-restconf:operations">> => #{}}, json:decode(Body)).
 
-data_root_not_implemented() ->
+data_root_has_yang_library() ->
     {Code, Headers, Body} = http_get("/restconf/data"),
-    ?assertEqual(501, Code),
+    ?assertEqual(200, Code),
     ?assertEqual("application/yang-data+json",
                  proplists:get_value("content-type", Headers)),
-    #{<<"ietf-restconf:errors">> := #{<<"error">> := [Err]}} = json:decode(Body),
-    ?assertEqual(<<"operation-not-supported">>, maps:get(<<"error-tag">>, Err)).
+    #{<<"ietf-yang-library:modules-state">> := State} = json:decode(Body),
+    ?assert(is_map(State)).
 
 xml_accept_is_not_acceptable() ->
     {Code, _, Body} =
