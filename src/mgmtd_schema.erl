@@ -12,7 +12,8 @@
          load_yang_schema_file/1, load_yang_schema_file/2]).
 -export([remove_schema/0, remove_schema/1]).
 -export([prepare_load/3, register_schema/1, register_schema/3,
-         unregister_schema/1, registered_schemas/0]).
+         unregister_schema/1, registered_schemas/0, loaded_schema_infos/0,
+         namespace_uri/1, restconf_module_name/2]).
 -export([register_identities/1, identities/0, identity_derived_from/2]).
 -export([prefix_container/2, mark_has_list_descendent/2]).
 -export([lookup/1, lookup/2, get_default/1, get_default/2]).
@@ -34,7 +35,7 @@
 %% Schema is stored in the mgmtd_commands ets table, keyed by {Path, Prefix}.
 %% Named prefixes are loaded as a real #container{} whose name is the prefix,
 %% so descendant schema paths start with that name. Default prefix is silent.
-%% A YANG namespace URI, when present, lives in the loaded_schemas registry.
+%% RESTCONF module name, namespace URI, and revision live in loaded_schemas.
 %%
 %% Mappings between JSON schema and Yang node types
 %%
@@ -113,17 +114,23 @@ prepare_load(Opts, _Source, TopNames) when is_map(Opts), is_list(TopNames) ->
                                 {error, _} = Err ->
                                     Err;
                                 ok ->
-                                    {ok, Prefix, Namespace}
+                                    Module = restconf_module_name(Prefix, Opts),
+                                    case check_module_unique(Prefix, Module) of
+                                        {error, _} = Err ->
+                                            Err;
+                                        ok ->
+                                            {ok, Prefix, Namespace}
+                                    end
                             end
                     end
             end
     end.
 
-register_schema(Name) ->
-    register_schema(Name, Name, unknown).
-
-register_schema(Prefix, Namespace, Source) ->
-    Info = #{prefix => Prefix, namespace => Namespace, source => Source},
+register_schema(Name) when is_atom(Name) ->
+    register_schema(#{prefix => Name, namespace => Name, source => unknown});
+register_schema(Info0) when is_map(Info0) ->
+    Info = normalize_schema_info(Info0),
+    #{prefix := Prefix} = Info,
     case schema_infos() of
         [] ->
             true = ets:insert(mgmtd_meta, {loaded_schemas, [Info]}),
@@ -137,6 +144,51 @@ register_schema(Prefix, Namespace, Source) ->
                     ok
             end
     end.
+
+register_schema(Prefix, Namespace, Source) ->
+    register_schema(#{prefix => Prefix, namespace => Namespace, source => Source}).
+
+-spec loaded_schema_infos() -> [schema_info()].
+loaded_schema_infos() ->
+    schema_infos().
+
+-spec namespace_uri(namespace()) -> string().
+namespace_uri(Ns) when is_atom(Ns) ->
+    "urn:mgmtd:" ++ atom_to_list(Ns);
+namespace_uri(Ns) when is_list(Ns) ->
+    Ns.
+
+-spec restconf_module_name(prefix(), map()) -> string().
+restconf_module_name(Prefix, Opts) when is_map(Opts) ->
+    case maps:get(restconf_module, Opts, undefined) of
+        undefined ->
+            atom_to_list(Prefix);
+        Name when is_list(Name) ->
+            Name;
+        Name when is_atom(Name) ->
+            atom_to_list(Name);
+        Name when is_binary(Name) ->
+            binary_to_list(Name)
+    end.
+
+normalize_schema_info(#{prefix := Prefix} = Info) ->
+    Ns = maps:get(namespace, Info, Prefix),
+    Module = case maps:get(module, Info, undefined) of
+                 undefined ->
+                     restconf_module_name(Prefix, Info);
+                 M when is_list(M) ->
+                     M;
+                 M when is_atom(M) ->
+                     atom_to_list(M);
+                 M when is_binary(M) ->
+                     binary_to_list(M)
+             end,
+    #{prefix => Prefix,
+      module => Module,
+      namespace => namespace_uri(Ns),
+      source => maps:get(source, Info, unknown),
+      revision => maps:get(revision, Info, undefined),
+      features => maps:get(features, Info, [])}.
 
 unregister_schema(Name) ->
     case schema_infos() of
@@ -325,11 +377,16 @@ named_prefixes() ->
     [P || #{prefix := P} <- schema_infos(), P =/= ?DEFAULT_NS].
 
 schema_infos() ->
-    case ets:lookup(mgmtd_meta, loaded_schemas) of
-        [] ->
+    case ets:info(mgmtd_meta, name) of
+        undefined ->
             [];
-        [{_, Infos}] ->
-            Infos
+        _ ->
+            case ets:lookup(mgmtd_meta, loaded_schemas) of
+                [] ->
+                    [];
+                [{_, Infos}] ->
+                    Infos
+            end
     end.
 
 maybe_add_prefixes(?DEFAULT_NS, [], delete, Maps) ->
@@ -402,22 +459,35 @@ validate_prefix(Prefix) ->
     {error, {invalid_prefix, Prefix}}.
 
 check_identity(Prefix, Namespace) ->
+    URI = namespace_uri(Namespace),
     case [I || #{prefix := P} = I <- schema_infos(), P =:= Prefix] of
         [] ->
-            check_namespace_unique(Prefix, Namespace);
-        [#{namespace := Namespace}] ->
-            ok;
-        [#{namespace := Other}] ->
-            {error, {prefix_namespace_mismatch, Prefix, Other}}
+            check_namespace_unique(Prefix, URI);
+        [Existing] ->
+            case namespace_uri(maps:get(namespace, Existing)) of
+                URI ->
+                    ok;
+                Other ->
+                    {error, {prefix_namespace_mismatch, Prefix, Other}}
+            end
     end.
 
-check_namespace_unique(_Prefix, Namespace) ->
+check_namespace_unique(_Prefix, URI) ->
     case [P || #{prefix := P, namespace := Ns} <- schema_infos(),
-               Ns =:= Namespace, is_list(Namespace)] of
+               namespace_uri(Ns) =:= URI] of
         [] ->
             ok;
         [OtherPrefix | _] ->
-            {error, {duplicate_namespace, Namespace, OtherPrefix}}
+            {error, {duplicate_namespace, URI, OtherPrefix}}
+    end.
+
+check_module_unique(Prefix, Module) ->
+    case [P || #{prefix := P, module := M} <- schema_infos(),
+               M =:= Module, P =/= Prefix] of
+        [] ->
+            ok;
+        [OtherPrefix | _] ->
+            {error, {duplicate_module, Module, OtherPrefix}}
     end.
 
 check_name_clash(?DEFAULT_NS, TopNames) ->
@@ -564,13 +634,23 @@ validate(Path, Item) ->
 
 cast_value(Path, Value) ->
     try case lists:last(Path) of
-            #{node_type := leaf, type := Type} ->
-                cast(Type, Value);
-            #{node_type := leaf_list, type := Type} when is_list(Value) ->
+            #{node_type := leaf, type := Type} = Last ->
+                case cast(Type, Value) of
+                    {ok, Internal} ->
+                        check_pattern(Last, Internal);
+                    Err ->
+                        Err
+                end;
+            #{node_type := leaf_list, type := Type} = Last when is_list(Value) ->
                 lists:map(fun(Val) ->
                                   case cast(Type, Val) of
                                       {ok, InternalVal} ->
-                                          {ok, InternalVal};
+                                          case check_pattern(Last, InternalVal) of
+                                              {ok, _} = Ok ->
+                                                  Ok;
+                                              Err ->
+                                                  throw(Err)
+                                          end;
                                       Err ->
                                           throw(Err)
                                   end
@@ -674,15 +754,28 @@ cast(string, Token) -> {ok, Token};
 cast(boolean, B) when is_boolean(B) -> {ok, B};
 cast(boolean, "true") -> {ok, true};
 cast(boolean, "false") -> {ok, false};
+cast(empty, empty) -> {ok, empty};
+cast(empty, "empty") -> {ok, empty};
+cast(empty, "") -> {ok, empty};
+cast(empty, _) -> {error, "empty type takes no value"};
+cast(binary, Token) -> cast_binary(Token);
 cast({enum, AllowedVals}, Token) -> cast_enum(Token, AllowedVals);
 cast({enumeration, AllowedVals}, Token) -> cast_enum(Token, AllowedVals);
 cast('inet:port-number', Token) -> cast_integer(Token, uint16_range());
 cast('inet:ip-address', Addr) when tuple_size(Addr) =:= 4; tuple_size(Addr) =:= 8 ->
     {ok, Addr};
 cast('inet:ip-address', Token) -> cast_ip_address(Token);
-cast({union, _Types}, _Token) -> {error, "union types are not supported yet"};
-cast({bits, _Bits}, _Token) -> {error, "bits types are not supported yet"};
-cast({leafref, _Path}, _Token) -> {error, "leafref types are not supported yet"};
+cast({union, Types}, Token) -> cast_union(Types, Token);
+cast({bits, Bits}, Token) -> cast_bits(Bits, Token);
+cast({leafref, _Path}, Token) -> cast_leafref(Token);
+cast({leafref, _Path, _Require}, Token) -> cast_leafref(Token);
+cast('instance-identifier', Token) -> cast_instance_identifier(Token);
+cast({'instance-identifier', _Require}, Token) ->
+    cast_instance_identifier(Token);
+cast({decimal64, Digits}, Token) ->
+    cast_decimal64(Token, Digits, undefined);
+cast({decimal64, Digits, Range}, Token) ->
+    cast_decimal64(Token, Digits, Range);
 cast({identityref, Base}, Token) ->
     cast_identityref(Base, Token);
 cast({Mod, Type}, Token) when is_atom(Mod) ->
@@ -707,6 +800,9 @@ is_yang_constructor(union) -> true;
 is_yang_constructor(bits) -> true;
 is_yang_constructor(leafref) -> true;
 is_yang_constructor(identityref) -> true;
+is_yang_constructor(empty) -> true;
+is_yang_constructor(binary) -> true;
+is_yang_constructor('instance-identifier') -> true;
 is_yang_constructor(uint8) -> true;
 is_yang_constructor(uint16) -> true;
 is_yang_constructor(uint32) -> true;
@@ -809,4 +905,122 @@ identity_syntax(S) ->
                 [{capture, none}]) of
         match -> true;
         nomatch -> false
+    end.
+
+check_pattern(#{pattern := Pat}, Val) when is_list(Pat), Pat =/= [] ->
+    S = pattern_string(Val),
+    Re = "^(?:" ++ Pat ++ ")$",
+    try re:run(S, Re, [{capture, none}]) of
+        match -> {ok, Val};
+        nomatch -> {error, "Value does not match pattern"}
+    catch
+        error:_ -> {error, "Value does not match pattern"}
+    end;
+check_pattern(_, Val) ->
+    {ok, Val}.
+
+pattern_string(V) when is_list(V) -> V;
+pattern_string(V) when is_integer(V) -> integer_to_list(V);
+pattern_string(V) when is_atom(V) -> atom_to_list(V);
+pattern_string(V) -> lists:flatten(io_lib:format("~p", [V])).
+
+cast_union([], _Token) ->
+    {error, "Invalid union value"};
+cast_union([Type | Rest], Token) ->
+    case cast(Type, Token) of
+        {ok, _} = Ok ->
+            Ok;
+        {error, _} ->
+            cast_union(Rest, Token)
+    end.
+
+cast_bits(Names, Token) ->
+    Given = bits_tokens(Token),
+    case Given -- Names of
+        [] ->
+            case length(Given) =:= length(lists:usort(Given)) of
+                false ->
+                    {error, "Duplicate bit name"};
+                true ->
+                    {ok, [N || N <- Names, lists:member(N, Given)]}
+            end;
+        _ ->
+            {error, "Unknown bit name"}
+    end.
+
+bits_tokens(L) when is_list(L), L =/= [], is_integer(hd(L)) ->
+    string:tokens(L, " \t\n");
+bits_tokens(L) when is_list(L) ->
+    L;
+bits_tokens(A) when is_atom(A) ->
+    [atom_to_list(A)];
+bits_tokens(_) ->
+    [].
+
+cast_leafref(Token) when is_list(Token) -> {ok, Token};
+cast_leafref(Token) when is_binary(Token) -> {ok, binary_to_list(Token)};
+cast_leafref(Token) when is_atom(Token) -> {ok, atom_to_list(Token)};
+cast_leafref(Token) when is_integer(Token) -> {ok, integer_to_list(Token)};
+cast_leafref(_) -> {error, "Invalid leafref"}.
+
+cast_instance_identifier(Token) when is_list(Token), Token =/= [] ->
+    {ok, Token};
+cast_instance_identifier(Token) when is_binary(Token) ->
+    {ok, binary_to_list(Token)};
+cast_instance_identifier(_) ->
+    {error, "Invalid instance-identifier"}.
+
+cast_binary(Token) when is_list(Token) ->
+    Compact = lists:flatten(string:tokens(Token, " \t\n\r")),
+    try base64:decode(Compact) of
+        _Bin -> {ok, Compact}
+    catch
+        error:_ -> {error, "Invalid binary (base64)"}
+    end;
+cast_binary(Bin) when is_binary(Bin) ->
+    {ok, base64:encode_to_string(Bin)};
+cast_binary(_) ->
+    {error, "Invalid binary (base64)"}.
+
+cast_decimal64(Token, Digits, Range) when is_integer(Token) ->
+    cast_decimal64(integer_to_list(Token), Digits, Range);
+cast_decimal64(Token, Digits, Range) when is_list(Token) ->
+    case parse_decimal_frac(Token) of
+        {ok, Frac} when length(Frac) =< Digits ->
+            case decimal_in_range(Token, Range) of
+                true -> {ok, Token};
+                false -> {error, "Value out of range"}
+            end;
+        {ok, _} ->
+            {error, "Too many fraction digits"};
+        error ->
+            {error, "Expected a decimal64 value"}
+    end;
+cast_decimal64(_, _, _) ->
+    {error, "Expected a decimal64 value"}.
+
+parse_decimal_frac(S) ->
+    case re:run(S, "^-?[0-9]+(\\.[0-9]+)?$", [{capture, none}]) of
+        match ->
+            case string:split(S, ".") of
+                [_, Frac] -> {ok, Frac};
+                _ -> {ok, ""}
+            end;
+        nomatch ->
+            error
+    end.
+
+decimal_in_range(_S, undefined) ->
+    true;
+decimal_in_range(S, Range) ->
+    N = decimal_number(S),
+    Min = proplists:get_value(min, Range, undefined),
+    Max = proplists:get_value(max, Range, undefined),
+    (Min =:= undefined orelse N >= Min)
+        andalso (Max =:= undefined orelse N =< Max).
+
+decimal_number(S) ->
+    case lists:member($., S) of
+        true -> list_to_float(S);
+        false -> float(list_to_integer(S))
     end.

@@ -397,6 +397,255 @@ must_current_outgoing_interface_test() ->
         mgmtd_cfg_db:remove_db(Db, [{backend, mnesia}])
     end.
 
+compile_remaining_types_test() ->
+    {ok, #{nodes := Nodes}} =
+        mgmtd_schema_yang:compile_file("test/yang/example-types.yang"),
+    #container{name = "types", children = Ch} =
+        lists:keyfind("types", #container.name, Nodes),
+    Kids = Ch(),
+    #leaf{type = {union, [uint8, string]}} =
+        lists:keyfind("num-or-name", #leaf.name, Kids),
+    #leaf{type = {bits, ["up", "down"]}} =
+        lists:keyfind("flags", #leaf.name, Kids),
+    #leaf{type = {decimal64, 2, Range}} =
+        lists:keyfind("ratio", #leaf.name, Kids),
+    ?assertEqual([{min, 0}, {max, 100}], Range),
+    #leaf{type = empty} =
+        lists:keyfind("marker", #leaf.name, Kids),
+    #leaf{type = binary} =
+        lists:keyfind("blob", #leaf.name, Kids),
+    #leaf{type = {'instance-identifier', true}} =
+        lists:keyfind("target", #leaf.name, Kids).
+
+compile_leafref_and_unique_test() ->
+    {ok, #{nodes := LrNodes}} =
+        mgmtd_schema_yang:compile_file("test/yang/example-leafref.yang"),
+    #leaf{type = {leafref, "/interface/name", true}} =
+        lists:keyfind("outgoing", #leaf.name, LrNodes),
+    {ok, #{nodes := UqNodes}} =
+        mgmtd_schema_yang:compile_file("test/yang/example-unique.yang"),
+    #list{opts = Opts} = lists:keyfind("server", #list.name, UqNodes),
+    ?assertEqual([["ip", "port"]], proplists:get_value(unique, Opts)).
+
+compile_enum_values_test() ->
+    {ok, #{nodes := Nodes}} =
+        mgmtd_schema_yang:compile_file("test/yang/example-xpath-funs.yang"),
+    #leaf{type = {enum, Members}} =
+        lists:keyfind("speed", #leaf.name, Nodes),
+    ?assertEqual([#{name => "slow", value => 1},
+                  #{name => "fast", value => 2}],
+                 [maps:with([name, value], M) || M <- Members]).
+
+union_and_bits_cast_test() ->
+    start_mgmtd(),
+    lists:foreach(fun mgmtd:remove_schema/1, mgmtd:registered_schemas()),
+    Db = "test_db_yang_types",
+    ok = mgmtd_cfg_db:remove_db(Db, [{backend, mnesia}]),
+    ok = mgmtd:load_yang_module("test/yang/example-types.yang"),
+    ok = mgmtd_cfg_db:init(Db, [{backend, mnesia}]),
+    try
+        {ok, PInt} = mgmtd_schema:lookup_path(
+                       ["ty", "types", "num-or-name", "9"]),
+        {ok, Txn} = mgmtd:txn_set(mgmtd:txn_new(), PInt),
+        {ok, _} = mgmtd:txn_commit(Txn),
+        ?assertEqual({ok, 9}, mgmtd:lookup(["ty", "types", "num-or-name"])),
+        {ok, PStr} = mgmtd_schema:lookup_path(
+                       ["ty", "types", "num-or-name", "hello"]),
+        {ok, Txn2} = mgmtd:txn_set(mgmtd:txn_new(), PStr),
+        {ok, _} = mgmtd:txn_commit(Txn2),
+        ?assertEqual({ok, "hello"}, mgmtd:lookup(["ty", "types", "num-or-name"])),
+        {ok, PBits} = mgmtd_schema:lookup_path(
+                        ["ty", "types", "flags", "up down"]),
+        {ok, Txn3} = mgmtd:txn_set(mgmtd:txn_new(), PBits),
+        {ok, _} = mgmtd:txn_commit(Txn3),
+        ?assertEqual({ok, ["up", "down"]},
+                     mgmtd:lookup(["ty", "types", "flags"])),
+        {ok, PBad} = mgmtd_schema:lookup_path(
+                       ["ty", "types", "flags", "nope"]),
+        {error, _} = mgmtd:txn_set(mgmtd:txn_new(), PBad),
+        {ok, PDec} = mgmtd_schema:lookup_path(
+                       ["ty", "types", "ratio", "1.5"]),
+        {ok, Txn4} = mgmtd:txn_set(mgmtd:txn_new(), PDec),
+        {ok, _} = mgmtd:txn_commit(Txn4),
+        ?assertEqual({ok, "1.5"}, mgmtd:lookup(["ty", "types", "ratio"])),
+        {ok, PFrac} = mgmtd_schema:lookup_path(
+                        ["ty", "types", "ratio", "1.555"]),
+        {error, _} = mgmtd:txn_set(mgmtd:txn_new(), PFrac),
+        {ok, PMark} = mgmtd_schema:lookup_path(
+                        ["ty", "types", "marker", ""]),
+        {ok, Txn5} = mgmtd:txn_set(mgmtd:txn_new(), PMark),
+        {ok, _} = mgmtd:txn_commit(Txn5),
+        ?assertEqual({ok, empty}, mgmtd:lookup(["ty", "types", "marker"])),
+        {ok, PBin} = mgmtd_schema:lookup_path(
+                       ["ty", "types", "blob", "YWI="]),
+        {ok, Txn6} = mgmtd:txn_set(mgmtd:txn_new(), PBin),
+        {ok, _} = mgmtd:txn_commit(Txn6),
+        ?assertEqual({ok, "YWI="}, mgmtd:lookup(["ty", "types", "blob"]))
+    after
+        mgmtd:remove_schema(ty),
+        mgmtd_cfg_db:remove_db(Db, [{backend, mnesia}])
+    end.
+
+leafref_commit_test() ->
+    start_mgmtd(),
+    lists:foreach(fun mgmtd:remove_schema/1, mgmtd:registered_schemas()),
+    Db = "test_db_yang_leafref",
+    ok = mgmtd_cfg_db:remove_db(Db, [{backend, mnesia}]),
+    ok = mgmtd:load_yang_module("test/yang/example-leafref.yang"),
+    ok = mgmtd_cfg_db:init(Db, [{backend, mnesia}]),
+    try
+        Txn = mgmtd:txn_new(),
+        {ok, If} = mgmtd_schema:lookup_path(
+                     ["lr", "interface", {"eth0"}, "enabled", "true"]),
+        {ok, Out} = mgmtd_schema:lookup_path(["lr", "outgoing", "eth0"]),
+        {ok, Txn2} = mgmtd:txn_set(Txn, If),
+        {ok, Txn3} = mgmtd:txn_set(Txn2, Out),
+        {ok, Txn4} = mgmtd:txn_commit(Txn3),
+        ?assertEqual({ok, "eth0"}, mgmtd:lookup(["lr", "outgoing"])),
+        {ok, Missing} = mgmtd_schema:lookup_path(["lr", "outgoing", "eth1"]),
+        {ok, Txn5} = mgmtd:txn_set(Txn4, Missing),
+        {error, {leafref_failed, ["lr", "outgoing"], "/interface/name", "eth1"}} =
+            mgmtd:txn_commit(Txn5)
+    after
+        mgmtd:remove_schema(lr),
+        mgmtd_cfg_db:remove_db(Db, [{backend, mnesia}])
+    end.
+
+leafref_deref_must_test() ->
+    start_mgmtd(),
+    lists:foreach(fun mgmtd:remove_schema/1, mgmtd:registered_schemas()),
+    Db = "test_db_yang_deref",
+    ok = mgmtd_cfg_db:remove_db(Db, [{backend, mnesia}]),
+    ok = mgmtd:load_yang_module("test/yang/example-leafref.yang"),
+    ok = mgmtd_cfg_db:init(Db, [{backend, mnesia}]),
+    try
+        Txn = mgmtd:txn_new(),
+        {ok, If} = mgmtd_schema:lookup_path(
+                     ["lr", "interface", {"eth0"}, "enabled", "false"]),
+        {ok, D} = mgmtd_schema:lookup_path(["lr", "deref-check", "eth0"]),
+        {ok, Txn2} = mgmtd:txn_set(Txn, If),
+        {ok, Txn3} = mgmtd:txn_set(Txn2, D),
+        {error, {must_failed, ["lr", "deref-check"],
+                 "deref(current())/../enabled = 'true'",
+                 "Outgoing interface must be enabled"}} =
+            mgmtd:txn_commit(Txn3),
+        {ok, On} = mgmtd_schema:lookup_path(
+                     ["lr", "interface", {"eth0"}, "enabled", "true"]),
+        {ok, Txn4} = mgmtd:txn_set(mgmtd:txn_new(), On),
+        {ok, Txn5} = mgmtd:txn_set(Txn4, D),
+        {ok, _} = mgmtd:txn_commit(Txn5)
+    after
+        mgmtd:remove_schema(lr),
+        mgmtd_cfg_db:remove_db(Db, [{backend, mnesia}])
+    end.
+
+unique_commit_test() ->
+    start_mgmtd(),
+    lists:foreach(fun mgmtd:remove_schema/1, mgmtd:registered_schemas()),
+    Db = "test_db_yang_unique",
+    ok = mgmtd_cfg_db:remove_db(Db, [{backend, mnesia}]),
+    ok = mgmtd:load_yang_module("test/yang/example-unique.yang"),
+    ok = mgmtd_cfg_db:init(Db, [{backend, mnesia}]),
+    try
+        Txn = mgmtd:txn_new(),
+        {ok, A1} = mgmtd_schema:lookup_path(
+                     ["uq", "server", {"a"}, "ip", "10.0.0.1"]),
+        {ok, A2} = mgmtd_schema:lookup_path(
+                     ["uq", "server", {"a"}, "port", "80"]),
+        {ok, B1} = mgmtd_schema:lookup_path(
+                     ["uq", "server", {"b"}, "ip", "10.0.0.2"]),
+        {ok, B2} = mgmtd_schema:lookup_path(
+                     ["uq", "server", {"b"}, "port", "80"]),
+        {ok, Txn2} = mgmtd:txn_set(Txn, A1),
+        {ok, Txn3} = mgmtd:txn_set(Txn2, A2),
+        {ok, Txn4} = mgmtd:txn_set(Txn3, B1),
+        {ok, Txn5} = mgmtd:txn_set(Txn4, B2),
+        {ok, Txn6} = mgmtd:txn_commit(Txn5),
+        {ok, C1} = mgmtd_schema:lookup_path(
+                     ["uq", "server", {"c"}, "ip", "10.0.0.1"]),
+        {ok, C2} = mgmtd_schema:lookup_path(
+                     ["uq", "server", {"c"}, "port", "80"]),
+        {ok, Txn7} = mgmtd:txn_set(Txn6, C1),
+        {ok, Txn8} = mgmtd:txn_set(Txn7, C2),
+        {error, {unique_failed, ["uq", "server"], ["ip", "port"]}} =
+            mgmtd:txn_commit(Txn8)
+    after
+        mgmtd:remove_schema(uq),
+        mgmtd_cfg_db:remove_db(Db, [{backend, mnesia}])
+    end.
+
+instance_identifier_commit_test() ->
+    start_mgmtd(),
+    lists:foreach(fun mgmtd:remove_schema/1, mgmtd:registered_schemas()),
+    Db = "test_db_yang_iid",
+    ok = mgmtd_cfg_db:remove_db(Db, [{backend, mnesia}]),
+    ok = mgmtd:load_yang_module("test/yang/example-types.yang"),
+    ok = mgmtd_cfg_db:init(Db, [{backend, mnesia}]),
+    try
+        {ok, Leaf} = mgmtd_schema:lookup_path(
+                       ["ty", "types", "num-or-name", "1"]),
+        {ok, Iid} = mgmtd_schema:lookup_path(
+                      ["ty", "types", "target", "/types/num-or-name"]),
+        {ok, Txn} = mgmtd:txn_set(mgmtd:txn_new(), Leaf),
+        {ok, Txn2} = mgmtd:txn_set(Txn, Iid),
+        {ok, _} = mgmtd:txn_commit(Txn2),
+        {ok, Bad} = mgmtd_schema:lookup_path(
+                      ["ty", "types", "target", "/types/missing"]),
+        {ok, Txn3} = mgmtd:txn_set(mgmtd:txn_new(), Bad),
+        {error, {instance_identifier_failed, ["ty", "types", "target"],
+                 "/types/missing"}} =
+            mgmtd:txn_commit(Txn3)
+    after
+        mgmtd:remove_schema(ty),
+        mgmtd_cfg_db:remove_db(Db, [{backend, mnesia}])
+    end.
+
+xpath_section10_functions_test() ->
+    start_mgmtd(),
+    lists:foreach(fun mgmtd:remove_schema/1, mgmtd:registered_schemas()),
+    Db = "test_db_yang_xfun",
+    ok = mgmtd_cfg_db:remove_db(Db, [{backend, mnesia}]),
+    ok = mgmtd:load_yang_module("test/yang/example-xpath-funs.yang"),
+    ok = mgmtd_cfg_db:init(Db, [{backend, mnesia}]),
+    try
+        {ok, Red} = mgmtd_schema:lookup_path(
+                      ["xf", "paint", "colour", "red"]),
+        {ok, Txn} = mgmtd:txn_set(mgmtd:txn_new(), Red),
+        {ok, _} = mgmtd:txn_commit(Txn),
+        {ok, Base} = mgmtd_schema:lookup_path(
+                       ["xf", "paint", "not-base", "colour"]),
+        {ok, TxnB} = mgmtd:txn_set(mgmtd:txn_new(), Base),
+        {error, {must_failed, ["xf", "paint", "not-base"],
+                 "derived-from(current(), \"colour\")", undefined}} =
+            mgmtd:txn_commit(TxnB),
+        {ok, Red2} = mgmtd_schema:lookup_path(
+                       ["xf", "paint", "not-base", "red"]),
+        {ok, TxnR} = mgmtd:txn_set(mgmtd:txn_new(), Red2),
+        {ok, _} = mgmtd:txn_commit(TxnR),
+        {ok, Slow} = mgmtd_schema:lookup_path(["xf", "speed", "slow"]),
+        {ok, TxnS} = mgmtd:txn_set(mgmtd:txn_new(), Slow),
+        {ok, _} = mgmtd:txn_commit(TxnS),
+        {ok, Up} = mgmtd_schema:lookup_path(["xf", "flags", "up"]),
+        {ok, TxnU} = mgmtd:txn_set(mgmtd:txn_new(), Up),
+        {ok, _} = mgmtd:txn_commit(TxnU),
+        {ok, Down} = mgmtd_schema:lookup_path(["xf", "flags", "down"]),
+        {ok, TxnD} = mgmtd:txn_set(mgmtd:txn_new(), Down),
+        {error, {must_failed, ["xf", "flags"],
+                 "bit-is-set(current(), \"up\")", undefined}} =
+            mgmtd:txn_commit(TxnD),
+        {ok, Name} = mgmtd_schema:lookup_path(["xf", "name", "Hello"]),
+        {ok, TxnN} = mgmtd:txn_set(mgmtd:txn_new(), Name),
+        {ok, _} = mgmtd:txn_commit(TxnN),
+        {ok, Bad} = mgmtd_schema:lookup_path(["xf", "name", "hello"]),
+        {ok, TxnX} = mgmtd:txn_set(mgmtd:txn_new(), Bad),
+        {error, {must_failed, ["xf", "name"],
+                 "re-match(current(), \"[A-Z][a-z]+\")", undefined}} =
+            mgmtd:txn_commit(TxnX)
+    after
+        mgmtd:remove_schema(xf),
+        mgmtd_cfg_db:remove_db(Db, [{backend, mnesia}])
+    end.
+
 must_and_when_stored_on_opts_test() ->
     Yang = <<"
         module m {

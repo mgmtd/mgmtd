@@ -29,15 +29,22 @@
                    | {int32, int_range()}
                    | {int64, int_range()}
                    | decimal64
+                   | {decimal64, pos_integer()}
+                   | {decimal64, pos_integer(), int_range()}
                    | integer
                    | string
                    | boolean
+                   | empty
+                   | binary
+                   | 'instance-identifier'
+                   | {'instance-identifier', boolean()}
                    | {enum, [enum_member()]}
                    | {enumeration, [enum_member()]}
                    | 'inet:ip-address'
                    | 'inet:port-number'
                    | {identityref, string()}
                    | {leafref, string()}
+                   | {leafref, string(), boolean()}
                    | {union, list()}
                    | {bits, list()}
                    | {Mod :: atom(), Type :: term()}.

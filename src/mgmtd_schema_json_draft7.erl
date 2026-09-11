@@ -23,7 +23,11 @@ load_json_schema(#{<<"$schema">> := ?DRAFT7_SCHEMA} = Schema, Opts) ->
         {ok, Prefix, Namespace} ->
             ParentPath = ensure_prefix_container(Prefix, Opts),
             ok = load_json_schema(Schema, ParentPath, Prefix, Opts),
-            mgmtd_schema:register_schema(Prefix, Namespace, json);
+            mgmtd_schema:register_schema(
+              #{prefix => Prefix,
+                namespace => Namespace,
+                source => json,
+                module => mgmtd_schema:restconf_module_name(Prefix, Opts)});
         {error, _} = Err ->
             Err
     end;

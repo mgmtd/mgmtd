@@ -1,0 +1,53 @@
+module example-xpath-funs {
+  namespace "urn:example:xpath-funs";
+  prefix xf;
+
+  identity colour;
+  identity red {
+    base colour;
+  }
+  identity blue {
+    base colour;
+  }
+  identity car;
+
+  container paint {
+    leaf colour {
+      type identityref {
+        base colour;
+      }
+      must 'derived-from-or-self(current(), "colour")';
+    }
+    leaf not-base {
+      type identityref {
+        base colour;
+      }
+      must 'derived-from(current(), "colour")';
+    }
+  }
+
+  leaf speed {
+    type enumeration {
+      enum slow {
+        value 1;
+      }
+      enum fast {
+        value 2;
+      }
+    }
+    must "enum-value(current()) > 0";
+  }
+
+  leaf flags {
+    type bits {
+      bit up;
+      bit down;
+    }
+    must 'bit-is-set(current(), "up")';
+  }
+
+  leaf name {
+    type string;
+    must 're-match(current(), "[A-Z][a-z]+")';
+  }
+}

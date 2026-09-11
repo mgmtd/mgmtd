@@ -10,8 +10,10 @@
 -endif.
 
 %% Prefix is the operational identity (CLI token, sys.config app key,
-%% ETS key). Namespace is the YANG URI when one exists; for JSON and
-%% Erlang schemas it is the same atom as the prefix.
+%% ETS key). Namespace on a loaded schema info is always a URI string
+%% (YANG namespace, or urn:mgmtd:<prefix> for JSON / Erlang). The
+%% RESTCONF / RFC 7951 module name is `module` and may differ from
+%% the prefix (YANG `ietf-interfaces` vs prefix `if`).
 -type prefix() :: atom().
 -type ns() :: prefix().
 -type namespace() :: prefix() | string().
@@ -22,6 +24,12 @@
 -type node_type() :: container | leaf | list | leaf_list | list_key.
 -type cmd_type() :: show | set | delete.
 -type schema_source() :: json | function | yang | unknown.
+-type schema_info() :: #{prefix := prefix(),
+                         module := string(),
+                         namespace := string(),
+                         source := schema_source(),
+                         revision := undefined | string(),
+                         features := [string()]}.
 
 -define(is_leaf(NodeType), NodeType == leaf orelse NodeType == leaf_list).
 -define(DEFAULT_NS, default).

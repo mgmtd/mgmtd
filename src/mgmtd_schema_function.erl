@@ -13,7 +13,11 @@ load(Fun, Opts) when is_function(Fun) ->
     case mgmtd_schema:prepare_load(Opts, function, TopNames) of
         {ok, Prefix, Namespace} ->
             ok = load_nodes(Prefix, Nodes, IsConfig, Callback),
-            mgmtd_schema:register_schema(Prefix, Namespace, function);
+            mgmtd_schema:register_schema(
+              #{prefix => Prefix,
+                namespace => Namespace,
+                source => function,
+                module => mgmtd_schema:restconf_module_name(Prefix, Opts)});
         {error, _} = Err ->
             Err
     end.

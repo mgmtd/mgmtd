@@ -1,16 +1,17 @@
-%% Evaluate YANG must/when with OTP xmerl_xpath over an XML projection
-%% of the transaction tree (RFC 7950 §6.4).
+%% Evaluate YANG must/when/leafref/unique with OTP xmerl_xpath over an
+%% XML projection of the transaction tree (RFC 7950 §6.4, §10).
 %%
-%% xmerl does not dispatch custom functions, so current() is rewritten
-%% to an absolute path to the context node. Unprefixed XPath names are
-%% matched by emitting local-name XML (no namespaces). Known YANG
-%% prefixes in the expression (if:foo) are stripped to local names.
+%% xmerl does not dispatch custom functions. current() is rewritten to
+%% an absolute path. RFC 7950 §10 functions are rewritten in the parsed
+%% AST to literals/numbers/true()/false() (deref to a node-set, then
+%% relative steps). Unprefixed XPath names match local-name XML.
 -module(mgmtd_yang_xpath).
 
 -export([validate_txn/1]).
 
 -include("mgmtd_schema.hrl").
 -include_lib("xmerl/include/xmerl.hrl").
+-include_lib("xmerl/include/xmerl_xpath.hrl").
 
 -spec validate_txn(mgmtd_cfg_txn:txn()) -> ok | {error, term()}.
 validate_txn(Txn) ->
@@ -31,7 +32,14 @@ validate_txn1(Txn) ->
             Rows = mgmtd_cfg_txn:match_object(
                      Txn, #cfg{_ = mgmtd_schema:ets_pat('_')}),
             {Doc, Index} = project_xml(Rows),
-            check_rows(Rows, Doc, Index)
+            Reverse = maps:fold(fun(P, E, Acc) -> Acc#{E => P} end, #{}, Index),
+            Env = #{doc => Doc, index => Index, reverse => Reverse, rows => Rows},
+            case check_rows(Rows, Env) of
+                ok ->
+                    check_uniques(Rows);
+                Error ->
+                    Error
+            end
     end.
 
 has_constraints() ->
@@ -42,37 +50,45 @@ has_constraints() ->
             lists:any(fun schema_has_constraint/1, ets:tab2list(mgmtd_commands))
     end.
 
-schema_has_constraint(#schema{opts = Opts}) ->
-    lists:keymember(must, 1, Opts) orelse lists:keymember('when', 1, Opts);
+schema_has_constraint(#schema{opts = Opts, type = Type}) ->
+    lists:keymember(must, 1, Opts)
+        orelse lists:keymember('when', 1, Opts)
+        orelse lists:keymember(unique, 1, Opts)
+        orelse is_ref_type(Type);
 schema_has_constraint(_) ->
     false.
 
-check_rows([], _Doc, _Index) ->
+is_ref_type({leafref, _}) -> true;
+is_ref_type({leafref, _, _}) -> true;
+is_ref_type('instance-identifier') -> true;
+is_ref_type({'instance-identifier', _}) -> true;
+is_ref_type(_) -> false.
+
+check_rows([], _Env) ->
     ok;
-check_rows([#cfg{node_type = list} | Rest], Doc, Index) ->
-    check_rows(Rest, Doc, Index);
-check_rows([#cfg{path = Path} = Cfg | Rest], Doc, Index) ->
+check_rows([#cfg{node_type = list} | Rest], Env) ->
+    check_rows(Rest, Env);
+check_rows([#cfg{path = Path} = Cfg | Rest], Env) ->
     case mgmtd_schema:lookup(Path) of
-        #{opts := Opts} ->
-            case check_opts(Cfg, Opts, Doc, Index) of
+        #{} = Schema ->
+            case check_opts(Cfg, Schema, Env) of
                 ok ->
-                    check_rows(Rest, Doc, Index);
+                    check_rows(Rest, Env);
                 Error ->
                     Error
             end;
         _ ->
-            check_rows(Rest, Doc, Index)
+            check_rows(Rest, Env)
     end.
 
-check_opts(#cfg{path = Path}, Opts, Doc, Index) ->
+check_opts(#cfg{path = Path} = Cfg, #{opts := Opts} = Schema, Env) ->
     case proplists:get_value('when', Opts, undefined) of
         undefined ->
-            check_musts(Path, proplists:get_all_values(must, Opts), Doc, Index);
+            after_when(Cfg, Schema, Env);
         WhenExpr ->
-            case eval_bool(WhenExpr, Path, Doc, Index) of
+            case eval_bool(WhenExpr, Path, Env) of
                 {ok, true} ->
-                    check_musts(Path, proplists:get_all_values(must, Opts),
-                                Doc, Index);
+                    after_when(Cfg, Schema, Env);
                 {ok, false} ->
                     {error, {when_failed, Path, WhenExpr}};
                 {error, _} = Err ->
@@ -80,13 +96,21 @@ check_opts(#cfg{path = Path}, Opts, Doc, Index) ->
             end
     end.
 
-check_musts(_Path, [], _Doc, _Index) ->
+after_when(Cfg, #{opts := Opts} = Schema, Env) ->
+    case check_musts(Cfg#cfg.path, proplists:get_all_values(must, Opts), Env) of
+        ok ->
+            check_ref(Cfg, Schema, Env);
+        Error ->
+            Error
+    end.
+
+check_musts(_Path, [], _Env) ->
     ok;
-check_musts(Path, [Must | Rest], Doc, Index) ->
+check_musts(Path, [Must | Rest], Env) ->
     {Expr, Msg} = must_parts(Must),
-    case eval_bool(Expr, Path, Doc, Index) of
+    case eval_bool(Expr, Path, Env) of
         {ok, true} ->
-            check_musts(Path, Rest, Doc, Index);
+            check_musts(Path, Rest, Env);
         {ok, false} ->
             {error, {must_failed, Path, Expr, Msg}};
         {error, _} = Err ->
@@ -98,7 +122,154 @@ must_parts(#{expr := Expr} = M) ->
 must_parts(Expr) when is_list(Expr) ->
     {Expr, undefined}.
 
-eval_bool(Expr, Path, Doc, Index) ->
+check_ref(#cfg{path = Path, value = Val} = Cfg, Schema, Env) ->
+    case maps:get(type, Schema, undefined) of
+        {leafref, RefPath} ->
+            check_leafref(Cfg, RefPath, true, Env);
+        {leafref, RefPath, Require} ->
+            check_leafref(Cfg, RefPath, Require, Env);
+        'instance-identifier' ->
+            check_iid(Path, Val, true, Env);
+        {'instance-identifier', Require} ->
+            check_iid(Path, Val, Require, Env);
+        _ ->
+            ok
+    end.
+
+check_leafref(_Cfg, _RefPath, false, _Env) ->
+    ok;
+check_leafref(#cfg{path = Path, value = Val}, RefPath, true, Env) ->
+    #{index := Index, doc := Doc} = Env,
+    case maps:find(Path, Index) of
+        error ->
+            ok;
+        {ok, El} ->
+            Ctx = xpath_context(El, Doc),
+            Rewritten = rewrite_expr(RefPath, Path),
+            case expr_nodeset(Rewritten, Ctx, Env) of
+                {ok, NS} ->
+                    Want = leaf_text(Val),
+                    case lists:any(fun(N) -> node_string(N) =:= Want end, NS) of
+                        true ->
+                            ok;
+                        false ->
+                            {error, {leafref_failed, Path, RefPath, Val}}
+                    end;
+                {error, _} = Err ->
+                    Err
+            end
+    end.
+
+check_iid(_Path, _Val, false, _Env) ->
+    ok;
+check_iid(Path, Val, true, #{doc := Doc} = Env) ->
+    Ctx = xpath_context_doc(Doc),
+    Rewritten = strip_prefixes(leaf_text(Val), yang_prefix_names()),
+    case expr_nodeset(Rewritten, Ctx, Env) of
+        {ok, []} ->
+            {error, {instance_identifier_failed, Path, Val}};
+        {ok, _} ->
+            ok;
+        {error, _} = Err ->
+            Err
+    end.
+
+check_uniques(Rows) ->
+    case ets:info(mgmtd_commands) of
+        undefined ->
+            ok;
+        _ ->
+            check_unique_schemas(
+              [S || S <- ets:tab2list(mgmtd_commands), is_unique_list(S)],
+              Rows)
+    end.
+
+is_unique_list(#schema{node_type = list, opts = Opts}) ->
+    lists:keymember(unique, 1, Opts);
+is_unique_list(_) ->
+    false.
+
+check_unique_schemas([], _Rows) ->
+    ok;
+check_unique_schemas([#schema{path = {ListPath, _}, opts = Opts} | Rest], Rows) ->
+    Uniques = proplists:get_value(unique, Opts, []),
+    case check_unique_constraints(ListPath, Uniques, Rows) of
+        ok ->
+            check_unique_schemas(Rest, Rows);
+        Error ->
+            Error
+    end.
+
+check_unique_constraints(_ListPath, [], _Rows) ->
+    ok;
+check_unique_constraints(ListPath, [Descendants | Rest], Rows) ->
+    Keys = [C || #cfg{node_type = list_key, path = P} = C <- Rows,
+                 instance_schema_path(P) =:= ListPath],
+    Groups = group_by_parent(Keys),
+    case lists:any(fun(Entries) -> unique_dup(Entries, Descendants, Rows) end,
+                   Groups) of
+        true ->
+            {error, {unique_failed, ListPath, Descendants}};
+        false ->
+            check_unique_constraints(ListPath, Rest, Rows)
+    end.
+
+group_by_parent(Keys) ->
+    Map = lists:foldl(
+            fun(#cfg{path = P} = C, Acc) ->
+                    Parent = lists:droplast(P),
+                    Acc#{Parent => [C | maps:get(Parent, Acc, [])]}
+            end, #{}, Keys),
+    maps:values(Map).
+
+unique_dup(Entries, Descendants, Rows) ->
+    {Seen, Dup} =
+        lists:foldl(
+          fun(#cfg{path = KeyPath}, {Acc, Found}) ->
+                  case unique_tuple(KeyPath, Descendants, Rows) of
+                      skip ->
+                          {Acc, Found};
+                      Tuple ->
+                          case maps:is_key(Tuple, Acc) of
+                              true -> {Acc, true};
+                              false -> {Acc#{Tuple => true}, Found}
+                          end
+                  end
+          end, {#{}, false}, Entries),
+    _ = Seen,
+    Dup.
+
+unique_tuple(KeyPath, Descendants, Rows) ->
+    unique_tuple(KeyPath, Descendants, Rows, []).
+
+unique_tuple(_KeyPath, [], _Rows, Acc) ->
+    list_to_tuple(lists:reverse(Acc));
+unique_tuple(KeyPath, [Desc | Rest], Rows, Acc) ->
+    LeafPath = KeyPath ++ descendant_path(Desc),
+    case lists:keyfind(LeafPath, #cfg.path, Rows) of
+        #cfg{value = Val} ->
+            unique_tuple(KeyPath, Rest, Rows, [Val | Acc]);
+        false ->
+            skip
+    end.
+
+descendant_path(Desc) ->
+    [local_step(S) || S <- string:tokens(Desc, "/")].
+
+local_step(Id) ->
+    case string:split(Id, ":") of
+        [_Pfx, Name] -> Name;
+        [Name] -> Name
+    end.
+
+instance_schema_path([]) ->
+    [];
+instance_schema_path([H | T]) when is_tuple(H) ->
+    instance_schema_path(T);
+instance_schema_path([H | T]) ->
+    [H | instance_schema_path(T)].
+
+eval_bool(Expr, Path, #{index := Index, doc := Doc} = Env) ->
     case maps:find(Path, Index) of
         error ->
             {ok, true};
@@ -108,13 +279,26 @@ eval_bool(Expr, Path, Doc, Index) ->
                 Tokens = xmerl_xpath_scan:tokens(Rewritten),
                 {ok, Parsed} = xmerl_xpath_parse:parse(Tokens),
                 Ctx = xpath_context(ContextEl, Doc),
-                {ok, xmerl_xpath_pred:eval(Parsed, Ctx)}
+                Ast1 = collapse_ns(rewrite_ast(Parsed, Ctx, Env)),
+                {ok, xmerl_xpath_pred:eval(Ast1, Ctx)}
             catch
                 exit:Reason ->
                     {error, {xpath_error, Path, Expr, Reason}};
                 error:Reason ->
                     {error, {xpath_error, Path, Expr, Reason}}
             end
+    end.
+
+expr_nodeset(Expr, Ctx, Env) ->
+    try
+        Tokens = xmerl_xpath_scan:tokens(Expr),
+        {ok, Parsed} = xmerl_xpath_parse:parse(Tokens),
+        {ok, ast_nodeset(rewrite_ast(Parsed, Ctx, Env), Ctx, Env)}
+    catch
+        exit:Reason ->
+            {error, {xpath_error, Expr, Reason}};
+        error:Reason ->
+            {error, {xpath_error, Expr, Reason}}
     end.
 
 xpath_context(El, Doc) ->
@@ -125,6 +309,12 @@ xpath_context(El, Doc) ->
                      parents = []},
     #xmlContext{context_node = ContextNode,
                 nodeset = [ContextNode],
+                whole_document = Whole}.
+
+xpath_context_doc(Doc) ->
+    Whole = #xmlNode{type = root_node, node = Doc, parents = []},
+    #xmlContext{context_node = Whole,
+                nodeset = [Whole],
                 whole_document = Whole}.
 
 parent_nodes(Parents, Doc) ->
@@ -153,6 +343,268 @@ locate_element(_Name, _Pos, []) ->
     exit(invalid_parents);
 locate_element(Name, Pos, [_ | T]) ->
     locate_element(Name, Pos, T).
+
+%%--------------------------------------------------------------------
+%% RFC 7950 §10 functions (rewritten in the parsed AST)
+%%--------------------------------------------------------------------
+
+yang_fun('re-match') -> true;
+yang_fun(deref) -> true;
+yang_fun('derived-from') -> true;
+yang_fun('derived-from-or-self') -> true;
+yang_fun('enum-value') -> true;
+yang_fun('bit-is-set') -> true;
+yang_fun(_) -> false.
+
+rewrite_ast({function_call, F, Args}, Ctx, Env) ->
+    Args1 = [rewrite_ast(A, Ctx, Env) || A <- Args],
+    case yang_fun(F) of
+        true ->
+            eval_yang_fun(F, Args1, Ctx, Env);
+        false ->
+            {function_call, F, Args1}
+    end;
+rewrite_ast({refine, Left, Step}, Ctx, Env) ->
+    case rewrite_ast(Left, Ctx, Env) of
+        {yang_nodeset, NS} ->
+            {yang_nodeset, apply_rel_step(NS, Step, Ctx)};
+        Left1 ->
+            {refine, Left1, Step}
+    end;
+rewrite_ast({comp, Op, A, B}, Ctx, Env) ->
+    {comp, Op,
+     collapse_ns(rewrite_ast(A, Ctx, Env)),
+     collapse_ns(rewrite_ast(B, Ctx, Env))};
+rewrite_ast({bool, Op, A, B}, Ctx, Env) ->
+    {bool, Op,
+     collapse_ns(rewrite_ast(A, Ctx, Env)),
+     collapse_ns(rewrite_ast(B, Ctx, Env))};
+rewrite_ast({arith, Op, A, B}, Ctx, Env) ->
+    {arith, Op,
+     collapse_ns(rewrite_ast(A, Ctx, Env)),
+     collapse_ns(rewrite_ast(B, Ctx, Env))};
+rewrite_ast({path, Type, PE}, Ctx, Env) ->
+    {path, Type, rewrite_ast(PE, Ctx, Env)};
+rewrite_ast({negative, A}, Ctx, Env) ->
+    {negative, collapse_ns(rewrite_ast(A, Ctx, Env))};
+rewrite_ast({pred, E}, Ctx, Env) ->
+    {pred, rewrite_ast(E, Ctx, Env)};
+rewrite_ast(Other, _Ctx, _Env) ->
+    Other.
+
+collapse_ns({yang_nodeset, NS}) ->
+    {literal, nodeset_string(NS)};
+collapse_ns(Other) ->
+    Other.
+
+eval_yang_fun('re-match', [Subject, Pattern], Ctx, _Env) ->
+    S = arg_string(Subject, Ctx),
+    P = arg_string(Pattern, Ctx),
+    bool_ast(re_match(S, P));
+eval_yang_fun(deref, [Arg], Ctx, Env) ->
+    NS = arg_nodeset(Arg, Ctx, Env),
+    {yang_nodeset, deref_nodes(NS, Ctx, Env)};
+eval_yang_fun('derived-from', [Arg, Ident], Ctx, _Env) ->
+    Name = arg_string(Arg, Ctx),
+    Base = arg_string(Ident, Ctx),
+    bool_ast(derived_from(Name, Base, false));
+eval_yang_fun('derived-from-or-self', [Arg, Ident], Ctx, _Env) ->
+    Name = arg_string(Arg, Ctx),
+    Base = arg_string(Ident, Ctx),
+    bool_ast(derived_from(Name, Base, true));
+eval_yang_fun('enum-value', [Arg], Ctx, Env) ->
+    {number, enum_value(Arg, Ctx, Env)};
+eval_yang_fun('bit-is-set', [Arg, Bit], Ctx, _Env) ->
+    S = arg_string(Arg, Ctx),
+    B = arg_string(Bit, Ctx),
+    bool_ast(lists:member(B, string:tokens(S, " \t")));
+eval_yang_fun(_, _, _, _) ->
+    bool_ast(false).
+
+bool_ast(true) -> {function_call, true, []};
+bool_ast(false) -> {function_call, false, []}.
+
+re_match(Subject, Pattern) ->
+    Re = "^(?:" ++ Pattern ++ ")$",
+    try re:run(Subject, Re, [{capture, none}]) of
+        match -> true;
+        nomatch -> false
+    catch
+        error:_ -> false
+    end.
+
+derived_from(Name, Base, true) ->
+    mgmtd_schema:identity_derived_from(Name, Base);
+derived_from(Name, Base, false) ->
+    mgmtd_schema:identity_derived_from(Name, Base)
+        andalso not mgmtd_schema:identity_derived_from(Base, Name).
+
+enum_value(Arg, Ctx, Env) ->
+    NS = arg_nodeset(Arg, Ctx, Env),
+    case NS of
+        [N | _] ->
+            Str = node_string(N),
+            case path_of_node(N, Env) of
+                {ok, Path} ->
+                    case mgmtd_schema:lookup(Path) of
+                        #{type := {enum, Members}} ->
+                            enum_int(Str, Members);
+                        #{type := {enumeration, Members}} ->
+                            enum_int(Str, Members);
+                        _ ->
+                            nan
+                    end;
+                error ->
+                    nan
+            end;
+        [] ->
+            nan
+    end.
+
+enum_int(Name, Members) ->
+    enum_int(Name, Members, 0).
+
+enum_int(Name, [M | Rest], I) ->
+    case enum_member_name(M) of
+        Name ->
+            case M of
+                #{value := V} -> V;
+                _ -> I
+            end;
+        _ ->
+            Next = case M of
+                       #{value := V} -> V + 1;
+                       _ -> I + 1
+                   end,
+            enum_int(Name, Rest, Next)
+    end;
+enum_int(_, [], _) ->
+    nan.
+
+enum_member_name(#{name := Name}) -> Name;
+enum_member_name({Name, _Desc}) -> Name;
+enum_member_name(Name) when is_list(Name) -> Name.
+
+deref_nodes(NS, Ctx, Env) ->
+    lists:append([deref_one(N, Ctx, Env) || N <- NS]).
+
+deref_one(N, Ctx, Env) ->
+    case path_of_node(N, Env) of
+        {ok, Path} ->
+            case mgmtd_schema:lookup(Path) of
+                #{type := {leafref, RefPath}} ->
+                    deref_leafref(N, Path, RefPath, Ctx, Env);
+                #{type := {leafref, RefPath, _}} ->
+                    deref_leafref(N, Path, RefPath, Ctx, Env);
+                #{type := 'instance-identifier'} ->
+                    deref_iid(N, Ctx, Env);
+                #{type := {'instance-identifier', _}} ->
+                    deref_iid(N, Ctx, Env);
+                _ ->
+                    []
+            end;
+        error ->
+            []
+    end.
+
+deref_leafref(N, Path, RefPath, _Ctx, #{doc := Doc} = Env) ->
+    El = node_el(N),
+    Ctx1 = xpath_context(El, Doc),
+    Rewritten = rewrite_expr(RefPath, Path),
+    Want = node_string(N),
+    case expr_nodeset(Rewritten, Ctx1, Env) of
+        {ok, Targets} ->
+            [T || T <- Targets, node_string(T) =:= Want];
+        {error, _} ->
+            []
+    end.
+
+deref_iid(N, Ctx, Env) ->
+    case expr_nodeset(strip_prefixes(node_string(N), yang_prefix_names()),
+                      Ctx#xmlContext{context_node = Ctx#xmlContext.whole_document},
+                      Env) of
+        {ok, NS} -> NS;
+        {error, _} -> []
+    end.
+
+arg_string({yang_nodeset, NS}, _Ctx) ->
+    nodeset_string(NS);
+arg_string({literal, S}, _Ctx) ->
+    S;
+arg_string({number, N}, _Ctx) when is_integer(N) ->
+    integer_to_list(N);
+arg_string({number, N}, _Ctx) when is_float(N) ->
+    lists:flatten(io_lib:format("~p", [N]));
+arg_string({function_call, true, []}, _Ctx) ->
+    "true";
+arg_string({function_call, false, []}, _Ctx) ->
+    "false";
+arg_string(Expr, Ctx) ->
+    case xmerl_xpath_pred:string(Ctx, [Expr]) of
+        #xmlObj{value = V} when is_list(V) -> V;
+        #xmlObj{value = V} -> lists:flatten(io_lib:format("~p", [V]))
+    end.
+
+arg_nodeset({yang_nodeset, NS}, _Ctx, _Env) ->
+    NS;
+arg_nodeset({path, Type, PE}, Ctx, _Env) ->
+    path_nodeset(Type, PE, Ctx);
+arg_nodeset({function_call, current, []}, Ctx, _Env) ->
+    [Ctx#xmlContext.context_node];
+arg_nodeset({refine, _, _} = R, Ctx, Env) ->
+    ast_nodeset(rewrite_ast(R, Ctx, Env), Ctx, Env);
+arg_nodeset(Other, Ctx, Env) ->
+    ast_nodeset(Other, Ctx, Env).
+
+ast_nodeset({yang_nodeset, NS}, _Ctx, _Env) ->
+    NS;
+ast_nodeset({path, Type, PE}, Ctx, _Env) ->
+    path_nodeset(Type, PE, Ctx);
+ast_nodeset({refine, Left, Step}, Ctx, Env) ->
+    apply_rel_step(ast_nodeset(Left, Ctx, Env), Step, Ctx);
+ast_nodeset(_, _Ctx, _Env) ->
+    [].
+
+path_nodeset(Type, PE, Ctx) ->
+    #state{context = C1} = xmerl_xpath:eval_path(Type, PE, Ctx),
+    C1#xmlContext.nodeset.
+
+apply_rel_step(NS, Step, Ctx) ->
+    lists:append(
+      [begin
+           C1 = Ctx#xmlContext{context_node = Node, nodeset = [Node]},
+           #state{context = C2} = xmerl_xpath:eval_path(rel, Step, C1),
+           C2#xmlContext.nodeset
+       end || Node <- NS]).
+
+path_of_node(N, #{reverse := Reverse}) ->
+    maps:find(node_el(N), Reverse).
+
+node_el(#xmlNode{node = El}) -> El;
+node_el(#xmlElement{} = El) -> El;
+node_el(Other) -> Other.
+
+nodeset_string([]) -> "";
+nodeset_string([N | _]) -> node_string(N).
+
+node_string(#xmlNode{node = El}) ->
+    node_string(El);
+node_string(#xmlElement{content = C}) ->
+    lists:flatten([V || #xmlText{value = V} <- flatten_content(C)]);
+node_string(#xmlText{value = V}) ->
+    V;
+node_string(_) ->
+    "".
+
+flatten_content(C) when is_list(C) ->
+    lists:flatten(
+      [case X of
+           #xmlElement{content = Inner} -> flatten_content(Inner);
+           #xmlText{} = T -> [T];
+           _ -> []
+       end || X <- C]);
+flatten_content(C) ->
+    flatten_content([C]).
 
 %%--------------------------------------------------------------------
 %% Expression rewrite
@@ -338,6 +790,10 @@ emit_container(#cfg{name = Name, path = Path}, Rows, Parents, Pos, Index) ->
     El = xml_el(ElName, Parents, Pos, Content),
     {[El], Index1#{Path => El}}.
 
+emit_leaf(Name, Path, empty, Parents, Pos, Index) ->
+    ElName = name_atom(Name),
+    El = xml_el(ElName, Parents, Pos, []),
+    {[El], Index#{Path => El}};
 emit_leaf(Name, Path, Value, Parents, Pos, Index) ->
     ElName = name_atom(Name),
     NewParents = Parents ++ [{ElName, Pos}],
@@ -359,8 +815,10 @@ name_atom(Name) when is_list(Name) -> list_to_atom(Name).
 
 leaf_text(true) -> "true";
 leaf_text(false) -> "false";
+leaf_text(empty) -> "";
 leaf_text(I) when is_integer(I) -> integer_to_list(I);
 leaf_text(B) when is_binary(B) -> binary_to_list(B);
+leaf_text([H | _] = Bits) when is_list(H) -> string:join(Bits, " ");
 leaf_text(L) when is_list(L) -> L;
 leaf_text(T) when is_tuple(T), tuple_size(T) =:= 4 ->
     ntoa_text(T);

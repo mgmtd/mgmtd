@@ -1,0 +1,18 @@
+module example-unique {
+  namespace "urn:example:unique";
+  prefix uq;
+
+  list server {
+    key "name";
+    unique "ip port";
+    leaf name {
+      type string;
+    }
+    leaf ip {
+      type string;
+    }
+    leaf port {
+      type uint16;
+    }
+  }
+}

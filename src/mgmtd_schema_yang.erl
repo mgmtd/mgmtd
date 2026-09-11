@@ -1,6 +1,7 @@
 %% Load RFC 7950 YANG modules into mgmtd schema ETS.
 %%
-%% PR 3: augment (local, uses, remote), identity/identityref, choice/case flatten.
+%% PR 5: remaining types (union/bits/decimal64/empty/binary/leafref/
+%% instance-identifier), unique, RFC 7950 §10 XPath functions.
 -module(mgmtd_schema_yang).
 
 -export([load_file/1, load_file/2]).
@@ -13,6 +14,7 @@
 -type compile_result() :: #{module := string(),
                             prefix := atom(),
                             namespace := string(),
+                            revision => undefined | string(),
                             yang_version := binary() | atom(),
                             nodes := [#container{} | #list{} | #leaf{} | #leaf_list{}],
                             identities => [map()],
@@ -80,6 +82,7 @@ compile([{module, _Ln, Name0, Body}], Opts) ->
                                     {ok, #{module => Name,
                                            prefix => PrefixAtom,
                                            namespace => NsUri,
+                                           revision => module_revision(Body),
                                            yang_version => maps:get(yang_version, Header, <<"1">>),
                                            nodes => Nodes,
                                            identities => Ids,
@@ -163,8 +166,10 @@ header(Body) ->
     end.
 
 load_compiled(Compiled, Opts) ->
-    #{prefix := Prefix, namespace := NsUri, nodes := Nodes} = Compiled,
-    LoadOpts = Opts#{prefix => Prefix, namespace => NsUri},
+    #{prefix := Prefix, namespace := NsUri, module := Module, nodes := Nodes} = Compiled,
+    RestconfMod = maps:get(restconf_module, Opts, Module),
+    LoadOpts = Opts#{prefix => Prefix, namespace => NsUri,
+                     restconf_module => RestconfMod},
     TopNames = [node_name(N) || N <- Nodes],
     case mgmtd_schema:prepare_load(LoadOpts, yang, TopNames) of
         {ok, Prefix1, Namespace} ->
@@ -175,11 +180,24 @@ load_compiled(Compiled, Opts) ->
                 _ ->
                     ok = mgmtd_schema_function:load_resolved(Prefix1, Nodes, Callback)
             end,
-            ok = mgmtd_schema:register_schema(Prefix1, Namespace, yang),
+            ok = mgmtd_schema:register_schema(
+                   #{prefix => Prefix1,
+                     namespace => Namespace,
+                     source => yang,
+                     module => RestconfMod,
+                     revision => maps:get(revision, Compiled, undefined)}),
             ok = mgmtd_schema:register_identities(maps:get(identities, Compiled, [])),
             apply_remote_augments(maps:get(remote_augments, Compiled, []), Callback);
         {error, _} = Err ->
             Err
+    end.
+
+module_revision(Body) ->
+    case [arg_str(D) || {revision, _Ln, D, _Sub} <- Body] of
+        [Latest | _] ->
+            Latest;
+        [] ->
+            undefined
     end.
 
 %%--------------------------------------------------------------------
@@ -1015,8 +1033,12 @@ resolve_type(Name, Sub, Ln, Ctx, Seen) ->
             case builtin_type(Name, Sub) of
                 {ok, {identityref_raw, Base}} ->
                     {ok, {identityref, expand_id_ref(Base, Ctx)}};
+                {ok, {union_raw, Members}} ->
+                    resolve_union(Members, Ln, Ctx, Seen);
                 {ok, _} = Ok ->
                     Ok;
+                {error, Reason} ->
+                    {error, {Ln, Reason}};
                 unknown ->
                     case well_known_type(typedef_local_name(Name), Sub) of
                         {ok, _} = Ok ->
@@ -1121,15 +1143,16 @@ import_ctx(Imp, Ctx) ->
          mod_prefix => maps:get(prefix, Imp),
          module => maps:get(name, Imp)}.
 
-builtin_type(<<"binary">>, _Sub) -> {ok, string};
+builtin_type(<<"binary">>, _Sub) -> {ok, binary};
 builtin_type(<<"bits">>, Sub) -> {ok, {bits, bit_names(Sub)}};
 builtin_type(<<"boolean">>, _) -> {ok, boolean};
-builtin_type(<<"decimal64">>, _) -> {ok, decimal64};
+builtin_type(<<"decimal64">>, Sub) -> decimal64_type(Sub);
 builtin_type(<<"empty">>, _) -> {ok, empty};
 builtin_type(<<"enumeration">>, Sub) -> {ok, {enum, enums(Sub)}};
 builtin_type(<<"identityref">>, Sub) ->
     {ok, {identityref_raw, find_arg(base, Sub)}};
-builtin_type(<<"instance-identifier">>, _) -> {ok, string};
+builtin_type(<<"instance-identifier">>, Sub) ->
+    {ok, {'instance-identifier', require_instance(Sub)}};
 builtin_type(<<"int8">>, Sub) -> int_type(int8, Sub);
 builtin_type(<<"int16">>, Sub) -> int_type(int16, Sub);
 builtin_type(<<"int32">>, Sub) -> int_type(int32, Sub);
@@ -1139,11 +1162,11 @@ builtin_type(<<"uint16">>, Sub) -> int_type(uint16, Sub);
 builtin_type(<<"uint32">>, Sub) -> int_type(uint32, Sub);
 builtin_type(<<"uint64">>, Sub) -> int_type(uint64, Sub);
 builtin_type(<<"leafref">>, Sub) ->
-    {ok, {leafref, arg_str(find_arg(path, Sub))}};
+    {ok, {leafref, arg_str(find_arg(path, Sub)), require_instance(Sub)}};
 builtin_type(<<"string">>, _Sub) ->
     {ok, string};
 builtin_type(<<"union">>, Sub) ->
-    {ok, {union, [T || {type, _, T, _} <- Sub]}};
+    {ok, {union_raw, [{arg_bin(Arg), TypeSub} || {type, _, Arg, TypeSub} <- Sub]}};
 %% Fallback when a module writes inet:* without importing ietf-inet-types.
 builtin_type(<<"inet:ip-address">>, _) -> {ok, 'inet:ip-address'};
 builtin_type(<<"inet:ipv4-address">>, _) -> {ok, 'inet:ip-address'};
@@ -1157,19 +1180,55 @@ int_type(Type, Sub) ->
         Range -> {ok, {Type, Range}}
     end.
 
+decimal64_type(Sub) ->
+    case find_arg('fraction-digits', Sub) of
+        undefined ->
+            {error, missing_fraction_digits};
+        Arg ->
+            Digits = arg_int(Arg),
+            case Digits >= 1 andalso Digits =< 18 of
+                false ->
+                    {error, {invalid_fraction_digits, Digits}};
+                true ->
+                    case parse_range(find_arg(range, Sub)) of
+                        undefined -> {ok, {decimal64, Digits}};
+                        Range -> {ok, {decimal64, Digits, Range}}
+                    end
+            end
+    end.
+
+require_instance(Sub) ->
+    find_arg('require-instance', Sub) =/= false.
+
+resolve_union(Members, Ln, Ctx, Seen) ->
+    resolve_union(Members, Ln, Ctx, Seen, []).
+
+resolve_union([], _Ln, _Ctx, _Seen, Acc) ->
+    {ok, {union, lists:reverse(Acc)}};
+resolve_union([{Name, Sub} | Rest], Ln, Ctx, Seen, Acc) ->
+    case resolve_type(Name, Sub, Ln, Ctx, Seen) of
+        {ok, Type} ->
+            resolve_union(Rest, Ln, Ctx, Seen, [Type | Acc]);
+        Error ->
+            Error
+    end.
+
 enums(Sub) ->
-    lists:filtermap(
-      fun({enum, _Ln, Name, EnumSub}) ->
-              Member = #{name => arg_str(Name),
-                         desc => find_desc(EnumSub)},
-              Member1 = case find_arg(value, EnumSub) of
-                            undefined -> Member;
-                            V -> Member#{value => arg_int(V)}
+    {Members, _} =
+        lists:foldl(
+          fun({enum, _Ln, Name, EnumSub}, {Acc, Next}) ->
+                  Val = case find_arg(value, EnumSub) of
+                            undefined -> Next;
+                            V -> arg_int(V)
                         end,
-              {true, Member1};
-         (_) ->
-              false
-      end, Sub).
+                  Member = #{name => arg_str(Name),
+                             desc => find_desc(EnumSub),
+                             value => Val},
+                  {Acc ++ [Member], Val + 1};
+             (_, AccNext) ->
+                  AccNext
+          end, {[], 0}, Sub),
+    Members.
 
 bit_names(Sub) ->
     [arg_str(N) || {bit, _, N, _} <- Sub].

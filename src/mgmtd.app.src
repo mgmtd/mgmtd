@@ -7,9 +7,10 @@
    [kernel,
     stdlib,
     xmerl,
-    json_polyfill
+    json_polyfill,
+    cowboy
    ]},
-  {env,[]},
+  {env, [{restconf_port, 8008}]},
   {modules, []},
 
   {licenses, ["Apache 2.0"]},

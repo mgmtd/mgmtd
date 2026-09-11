@@ -1,0 +1,29 @@
+module example-leafref {
+  namespace "urn:example:leafref";
+  prefix lr;
+
+  list interface {
+    key "name";
+    leaf name {
+      type string;
+    }
+    leaf enabled {
+      type boolean;
+    }
+  }
+
+  leaf outgoing {
+    type leafref {
+      path "/interface/name";
+    }
+  }
+
+  leaf deref-check {
+    type leafref {
+      path "/interface/name";
+    }
+    must "deref(current())/../enabled = 'true'" {
+      error-message "Outgoing interface must be enabled";
+    }
+  }
+}
