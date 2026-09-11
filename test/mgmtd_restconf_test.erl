@@ -12,6 +12,7 @@ default_port_test() ->
 listener_test_() ->
     {setup, fun setup/0, fun teardown/1,
      [fun host_meta_advertises_restconf/0,
+      fun options_and_head/0,
       fun api_root_is_yang_json/0,
       fun yang_library_version/0,
       fun modules_state_includes_builtins/0,
@@ -94,6 +95,26 @@ xml_accept_is_not_acceptable() ->
 unknown_path_is_not_found() ->
     {Code, _, _} = http_get("/"),
     ?assertEqual(404, Code).
+
+options_and_head() ->
+    {OptCode, OptHdrs, _} = http_req(options, "/restconf/data", []),
+    ?assertEqual(200, OptCode),
+    Allow = proplists:get_value("allow", OptHdrs),
+    ?assert(is_list(Allow) andalso string:find(Allow, "GET") =/= nomatch),
+    {HeadCode, HeadHdrs, HeadBody} = http_req(head, "/restconf", []),
+    ?assertEqual(200, HeadCode),
+    ?assertEqual(<<>>, HeadBody),
+    ?assertEqual("application/yang-data+json",
+                 proplists:get_value("content-type", HeadHdrs)).
+
+http_req(Method, Path, ExtraHdrs) ->
+    Url = lists:flatten(
+            io_lib:format("http://127.0.0.1:~p~s",
+                          [mgmtd_restconf:port(), Path])),
+    {ok, {{_, Code, _}, Headers, Body}} =
+        httpc:request(Method, {Url, ExtraHdrs}, [{timeout, 2000}],
+                      [{body_format, binary}]),
+    {Code, Headers, Body}.
 
 http_get(Path) ->
     http_get(Path, []).

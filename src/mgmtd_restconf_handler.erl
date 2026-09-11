@@ -17,16 +17,35 @@ init(Req0, State) ->
 
 handle(<<"GET">>, <<"/.well-known/host-meta">>, Req) ->
     host_meta(Req);
+handle(<<"HEAD">>, <<"/.well-known/host-meta">>, Req) ->
+    cowboy_req:reply(200, #{<<"content-type">> => ?XRD}, <<>>, Req);
+handle(<<"OPTIONS">>, Path, Req) ->
+    case is_data_path(Path) of
+        true ->
+            mgmtd_restconf_data:http(<<"OPTIONS">>, Path, Req);
+        false ->
+            cowboy_req:reply(200, #{<<"allow">> => <<"GET, HEAD, OPTIONS">>}, <<>>, Req)
+    end;
 handle(<<"GET">>, <<"/restconf">>, Req) ->
     json_get(Req, fun mgmtd_restconf_yanglib:api_root/0);
 handle(<<"GET">>, <<"/restconf/">>, Req) ->
     json_get(Req, fun mgmtd_restconf_yanglib:api_root/0);
+handle(<<"HEAD">>, <<"/restconf">>, Req) ->
+    json_head(Req, fun mgmtd_restconf_yanglib:api_root/0);
+handle(<<"HEAD">>, <<"/restconf/">>, Req) ->
+    json_head(Req, fun mgmtd_restconf_yanglib:api_root/0);
 handle(<<"GET">>, <<"/restconf/yang-library-version">>, Req) ->
     json_get(Req, fun mgmtd_restconf_yanglib:yang_library_version/0);
+handle(<<"HEAD">>, <<"/restconf/yang-library-version">>, Req) ->
+    json_head(Req, fun mgmtd_restconf_yanglib:yang_library_version/0);
 handle(<<"GET">>, <<"/restconf/operations">>, Req) ->
     json_get(Req, fun() -> #{<<"ietf-restconf:operations">> => #{}} end);
 handle(<<"GET">>, <<"/restconf/operations/">>, Req) ->
     json_get(Req, fun() -> #{<<"ietf-restconf:operations">> => #{}} end);
+handle(<<"HEAD">>, <<"/restconf/operations">>, Req) ->
+    json_head(Req, fun() -> #{<<"ietf-restconf:operations">> => #{}} end);
+handle(<<"HEAD">>, <<"/restconf/operations/">>, Req) ->
+    json_head(Req, fun() -> #{<<"ietf-restconf:operations">> => #{}} end);
 handle(Method, Path, Req) ->
     case is_data_path(Path) of
         true ->
@@ -37,7 +56,8 @@ handle(Method, Path, Req) ->
             method_not_allowed(Req)
     end.
 
-data_method(<<"GET">>, Path, Req) ->
+data_method(Method, Path, Req)
+  when Method =:= <<"GET">>; Method =:= <<"HEAD">> ->
     case negotiate(Req) of
         xml ->
             mgmtd_restconf_error:reply(
@@ -45,7 +65,7 @@ data_method(<<"GET">>, Path, Req) ->
               #{tag => <<"operation-not-supported">>,
                 message => <<"XML encoding not supported">>});
         json ->
-            mgmtd_restconf_data:http(<<"GET">>, Path, Req)
+            mgmtd_restconf_data:http(Method, Path, Req)
     end;
 data_method(Method, Path, Req)
   when Method =:= <<"PUT">>; Method =:= <<"POST">>;
@@ -68,13 +88,29 @@ json_get(Req, Fun) ->
     case negotiate(Req) of
         json ->
             Body = iolist_to_binary(json:encode(Fun())),
-            cowboy_req:reply(200, #{<<"content-type">> => ?JSON}, Body, Req);
+            cowboy_req:reply(200, json_headers(Body), Body, Req);
         xml ->
             mgmtd_restconf_error:reply(
               Req, 406,
               #{tag => <<"operation-not-supported">>,
                 message => <<"XML encoding not supported">>})
     end.
+
+json_head(Req, Fun) ->
+    case negotiate(Req) of
+        json ->
+            Body = iolist_to_binary(json:encode(Fun())),
+            cowboy_req:reply(200, json_headers(Body), <<>>, Req);
+        xml ->
+            mgmtd_restconf_error:reply(
+              Req, 406,
+              #{tag => <<"operation-not-supported">>,
+                message => <<"XML encoding not supported">>})
+    end.
+
+json_headers(Body) ->
+    #{<<"content-type">> => ?JSON,
+      <<"content-length">> => integer_to_binary(byte_size(Body))}.
 
 not_found(Req) ->
     cowboy_req:reply(404, #{}, <<>>, Req).

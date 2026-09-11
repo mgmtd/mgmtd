@@ -12,6 +12,7 @@ identity_test_() ->
       fun named_function_schema_uses_prefix_as_module/0,
       fun json_schema_synthesizes_urn/0,
       fun yang_module_name_differs_from_prefix/0,
+      fun remote_augment_origin_module/0,
       fun restconf_module_override/0,
       fun modules_state_lists_all_sources/0]}.
 
@@ -55,6 +56,16 @@ json_schema_synthesizes_urn() ->
     ?assertEqual("urn:mgmtd:draft7", maps:get(namespace, Info)),
     ?assertEqual(json, maps:get(source, Info)),
     ok = mgmtd:remove_schema(draft7).
+
+remote_augment_origin_module() ->
+    ok = mgmtd:load_yang_module("test/yang/example-base.yang"),
+    ok = mgmtd:load_yang_module("test/yang/example-remote-aug.yang"),
+    {ok, Map} = mgmtd_restconf_data:resource(
+                  <<"/restconf/data/example-base:root">>, all),
+    #{<<"example-base:root">> := Root} = Map,
+    ?assertEqual(true, maps:is_key(<<"example-remote-aug:y">>, Root)),
+    ok = mgmtd:remove_schema(base),
+    ok = mgmtd:remove_schema(ra).
 
 yang_module_name_differs_from_prefix() ->
     ok = mgmtd:load_yang_module("test/yang/example-server.yang"),

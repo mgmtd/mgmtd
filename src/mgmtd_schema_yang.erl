@@ -187,7 +187,8 @@ load_compiled(Compiled, Opts) ->
                      module => RestconfMod,
                      revision => maps:get(revision, Compiled, undefined)}),
             ok = mgmtd_schema:register_identities(maps:get(identities, Compiled, [])),
-            apply_remote_augments(maps:get(remote_augments, Compiled, []), Callback);
+            apply_remote_augments(maps:get(remote_augments, Compiled, []),
+                                  Callback, maps:get(module, Compiled));
         {error, _} = Err ->
             Err
     end.
@@ -892,16 +893,16 @@ append_children(#list{children = Ch} = N, Extra, _Ln, _Path) ->
 append_children(_Other, _Extra, Ln, Path) ->
     {error, {Ln, augment_not_a_data_node, Path}}.
 
-apply_remote_augments([], _Callback) ->
+apply_remote_augments([], _Callback, _Origin) ->
     ok;
-apply_remote_augments([#{target := Steps, nodes := Nodes, line := Ln, path := Path} | Rest], Callback) ->
+apply_remote_augments([#{target := Steps, nodes := Nodes, line := Ln, path := Path} | Rest], Callback, Origin) ->
     case remote_target(Steps) of
         {error, Reason} ->
             {error, {Ln, Reason, Path}};
         {Prefix, ParentPath} ->
-            case mgmtd_schema_function:load_resolved_at(Prefix, ParentPath, Nodes, Callback) of
+            case mgmtd_schema_function:load_resolved_at(Prefix, ParentPath, Nodes, Callback, Origin) of
                 ok ->
-                    apply_remote_augments(Rest, Callback);
+                    apply_remote_augments(Rest, Callback, Origin);
                 {error, _} = Err ->
                     prepend_error(Err, Ln, Path)
             end

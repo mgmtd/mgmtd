@@ -75,6 +75,7 @@
                       cmd_type => cmd_type(),
                       has_list => boolean(),
                       opts => list(),
+                      origin_module => string() | undefined,
                       children => function() }.
 
 -type full_schema_path() :: [#schema{}].

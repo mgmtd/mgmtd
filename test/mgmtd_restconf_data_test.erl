@@ -11,6 +11,8 @@
 get_test_() ->
     {setup, fun setup/0, fun teardown/1,
      [fun default_leaf/0,
+      fun with_defaults_trim/0,
+      fun with_defaults_explicit/0,
       fun default_list_instance/0,
       fun named_prefix_leaf/0,
       fun json_schema_leaf_and_list/0,
@@ -155,6 +157,24 @@ defaulted_leaf() ->
     {ok, Map} = mgmtd_restconf_data:resource(
                   <<"/restconf/data/default:interface/speed">>, all),
     ?assertEqual(#{<<"default:speed">> => <<"1GbE">>}, Map).
+
+with_defaults_trim() ->
+    {ok, #{<<"default:interface">> := Iface}} =
+        mgmtd_restconf_data:resource(
+          <<"/restconf/data/default:interface">>,
+          #{content => all, defaults => trim}),
+    ?assertEqual(false, maps:is_key(<<"speed">>, Iface)).
+
+with_defaults_explicit() ->
+    {ok, #{<<"default:interface">> := Iface}} =
+        mgmtd_restconf_data:resource(
+          <<"/restconf/data/default:interface">>,
+          #{content => all, defaults => explicit}),
+    ?assertEqual(false, maps:is_key(<<"speed">>, Iface)),
+    {ok, #{<<"default:speed">> := <<"1GbE">>}} =
+        mgmtd_restconf_data:resource(
+          <<"/restconf/data/default:interface/speed">>,
+          #{content => all, defaults => report_all}).
 
 http_get_default_leaf() ->
     {Code, _, Body} = http_get("/restconf/data/default:server/servers=web/port"),

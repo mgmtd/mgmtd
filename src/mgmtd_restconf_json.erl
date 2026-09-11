@@ -12,18 +12,25 @@
 
 -include("mgmtd_schema.hrl").
 
--spec encode(term(), all | config | nonconfig) ->
+-spec encode(term(), all | config | nonconfig | map()) ->
           {ok, map()} | {error, map()}.
-encode(datastore, Content) ->
-    {ok, encode_datastore(Content)};
-encode(yanglib_state, Content) ->
+encode(What, Content) when Content =:= all; Content =:= config; Content =:= nonconfig ->
+    encode(What, #{content => Content, defaults => report_all});
+encode(What, Opts) when is_map(Opts) ->
+    Ctx = #{content => maps:get(content, Opts, all),
+            defaults => maps:get(defaults, Opts, report_all)},
+    encode_ctx(What, Ctx).
+
+encode_ctx(datastore, Ctx) ->
+    {ok, encode_datastore(Ctx)};
+encode_ctx(yanglib_state, #{content := Content}) ->
     case include_config(false, Content) of
         true ->
             {ok, mgmtd_restconf_yanglib:modules_state()};
         false ->
             {error, not_found()}
     end;
-encode(yanglib_id, Content) ->
+encode_ctx(yanglib_id, #{content := Content}) ->
     case include_config(false, Content) of
         true ->
             {ok, #{<<"ietf-yang-library:module-set-id">> =>
@@ -31,18 +38,19 @@ encode(yanglib_id, Content) ->
         false ->
             {error, not_found()}
     end;
-encode(#{item_path := Path, schema := Schema, module := Module}, Content) ->
+encode_ctx(#{item_path := Path, schema := Schema, module := Module},
+           #{content := Content} = Ctx) ->
     case include_node(Schema, Content) of
         false ->
             {error, not_found()};
         true ->
-            encode_target(Path, Schema, Module, Content)
+            encode_target(Path, Schema, Module, Ctx)
     end.
 
-encode_datastore(Content) ->
+encode_datastore(#{content := Content} = Ctx) ->
     User = lists:foldl(
              fun(Info, Acc) ->
-                     maps:merge(Acc, encode_module_top(Info, Content))
+                     maps:merge(Acc, encode_module_top(Info, Ctx))
              end, #{}, mgmtd_schema:loaded_schema_infos()),
     case include_config(false, Content) of
         true ->
@@ -51,30 +59,28 @@ encode_datastore(Content) ->
             User
     end.
 
-encode_module_top(#{prefix := Prefix, module := Module}, Content) ->
+encode_module_top(#{prefix := Prefix, module := Module}, Ctx) ->
     TopPath = prefix_base(Prefix),
     Children = restconf_children(TopPath, Prefix),
     lists:foldl(
       fun(Child, Acc) ->
-              case encode_child(TopPath, Child, Module, Content, qualified) of
+              case encode_child(TopPath, Child, Module, Ctx, qualified) of
                   omit -> Acc;
                   {Key, Val} -> Acc#{Key => Val}
               end
       end, #{}, Children).
 
-encode_target(Path, #{node_type := container} = Schema, Module, Content) ->
-    case encode_container_body(Path, Schema, Module, Content) of
-        Body ->
-            {ok, #{qname(Module, maps:get(name, Schema)) => Body}}
-    end;
-encode_target(Path, #{node_type := list, name := Name} = Schema, Module, Content) ->
+encode_target(Path, #{node_type := container} = Schema, Module, Ctx) ->
+    Body = encode_container_body(Path, Schema, Module, Ctx),
+    {ok, #{qname(Module, maps:get(name, Schema)) => Body}};
+encode_target(Path, #{node_type := list, name := Name} = Schema, Module, Ctx) ->
     case lists:last(Path) of
         Key when is_tuple(Key) ->
             case instance_exists(Path, Schema) of
                 false ->
                     {error, not_found()};
                 true ->
-                    case encode_list_item(Path, Schema, Module, Content) of
+                    case encode_list_item(Path, Schema, Module, Ctx) of
                         omit ->
                             {error, not_found()};
                         Map ->
@@ -83,16 +89,16 @@ encode_target(Path, #{node_type := list, name := Name} = Schema, Module, Content
             end;
         _ ->
             {ok, #{qname(Module, Name) =>
-                       encode_list_body(Path, Schema, Module, Content)}}
+                       encode_list_body(Path, Schema, Module, Ctx)}}
     end;
-encode_target(Path, #{node_type := leaf, name := Name} = Schema, Module, _Content) ->
-    case read_leaf(Path, Schema) of
-        none ->
+encode_target(Path, #{node_type := leaf, name := Name} = Schema, Module, Ctx) ->
+    case leaf_json(Path, Schema, Ctx) of
+        omit ->
             {error, not_found()};
-        {ok, Value} ->
-            {ok, #{qname(Module, Name) => encode_value(maps:get(type, Schema), Value)}}
+        Val ->
+            {ok, #{qname(Module, Name) => Val}}
     end;
-encode_target(Path, #{node_type := leaf_list, name := Name} = Schema, Module, _Content) ->
+encode_target(Path, #{node_type := leaf_list, name := Name} = Schema, Module, Ctx) ->
     case lists:last(Path) of
         {Val} ->
             case leaf_list_has(Path, Schema, Val) of
@@ -103,78 +109,81 @@ encode_target(Path, #{node_type := leaf_list, name := Name} = Schema, Module, _C
                     {ok, #{qname(Module, Name) => [encode_value(Type, Val)]}}
             end;
         _ ->
-            Vals = read_leaf_list(Path, Schema),
-            {ok, #{qname(Module, Name) =>
-                       [encode_value(maps:get(type, Schema), V) || V <- Vals]}}
+            case leaf_list_json(Path, Schema, Ctx) of
+                omit ->
+                    {error, not_found()};
+                Vals ->
+                    {ok, #{qname(Module, Name) => Vals}}
+            end
     end.
 
-encode_container_body(Path, _Schema, Module, Content) ->
+encode_container_body(Path, _Schema, Module, Ctx) ->
     Children = mgmtd_schema:children(Path, show),
     lists:foldl(
       fun(Child, Acc) ->
-              case encode_child(Path, Child, Module, Content, local) of
+              case encode_child(Path, Child, Module, Ctx, local) of
                   omit -> Acc;
                   {Key, Val} -> Acc#{Key => Val}
               end
       end, #{}, Children).
 
-encode_child(Parent, #{name := Name} = Child, Module, Content, Qual) ->
+encode_child(Parent, #{name := Name} = Child, Module, #{content := Content} = Ctx, Qual) ->
     case include_node(Child, Content) of
         false ->
             omit;
         true ->
             Path = Parent ++ [Name],
+            ChildMod = child_module(Child, Module),
             Key = case Qual of
-                      qualified -> qname(Module, Name);
-                      local -> list_to_binary(Name)
+                      qualified ->
+                          qname(ChildMod, Name);
+                      local when ChildMod =/= Module ->
+                          qname(ChildMod, Name);
+                      local ->
+                          list_to_binary(Name)
                   end,
-            encode_child_value(Path, Child, Module, Content, Key)
+            encode_child_value(Path, Child, ChildMod, Ctx, Key)
     end.
 
-encode_child_value(Path, #{node_type := leaf} = Schema, _Module, _Content, Key) ->
-    case read_leaf(Path, Schema) of
-        none ->
-            omit;
-        {ok, Value} ->
-            {Key, encode_value(maps:get(type, Schema), Value)}
+encode_child_value(Path, #{node_type := leaf} = Schema, _Module, Ctx, Key) ->
+    case leaf_json(Path, Schema, Ctx) of
+        omit -> omit;
+        Val -> {Key, Val}
     end;
-encode_child_value(Path, #{node_type := leaf_list} = Schema, _Module, _Content, Key) ->
-    case read_leaf_list(Path, Schema) of
-        [] ->
-            omit;
-        Vals ->
-            Type = maps:get(type, Schema),
-            {Key, [encode_value(Type, V) || V <- Vals]}
+encode_child_value(Path, #{node_type := leaf_list} = Schema, _Module, Ctx, Key) ->
+    case leaf_list_json(Path, Schema, Ctx) of
+        omit -> omit;
+        Vals -> {Key, Vals}
     end;
-encode_child_value(Path, #{node_type := container} = Schema, Module, Content, Key) ->
-    Body = encode_container_body(Path, Schema, Module, Content),
+encode_child_value(Path, #{node_type := container} = Schema, Module, Ctx, Key) ->
+    Body = encode_container_body(Path, Schema, Module, Ctx),
     case maps:size(Body) of
         0 -> omit;
         _ -> {Key, Body}
     end;
-encode_child_value(Path, #{node_type := list} = Schema, Module, Content, Key) ->
-    case encode_list_body(Path, Schema, Module, Content) of
+encode_child_value(Path, #{node_type := list} = Schema, Module, Ctx, Key) ->
+    case encode_list_body(Path, Schema, Module, Ctx) of
         [] -> omit;
         Items -> {Key, Items}
     end;
-encode_child_value(_Path, _Schema, _Module, _Content, _Key) ->
+encode_child_value(_Path, _Schema, _Module, _Ctx, _Key) ->
     omit.
 
-encode_list_body(Path, Schema, Module, Content) ->
+encode_list_body(Path, Schema, Module, Ctx) ->
     Keys = list_keys(Path),
     lists:filtermap(
       fun(Key) ->
-              case encode_list_item(Path ++ [Key], Schema, Module, Content) of
+              case encode_list_item(Path ++ [Key], Schema, Module, Ctx) of
                   omit -> false;
                   Map -> {true, Map}
               end
       end, lists:sort(Keys)).
 
-encode_list_item(Path, _Schema, Module, Content) ->
+encode_list_item(Path, _Schema, Module, Ctx) ->
     Children = mgmtd_schema:children(Path, show),
     Map = lists:foldl(
             fun(Child, Acc) ->
-                    case encode_child(Path, Child, Module, Content, local) of
+                    case encode_child(Path, Child, Module, Ctx, local) of
                         omit -> Acc;
                         {Key, Val} -> Acc#{Key => Val}
                     end
@@ -183,6 +192,45 @@ encode_list_item(Path, _Schema, Module, Content) ->
         0 -> omit;
         _ -> Map
     end.
+
+child_module(#{origin_module := Origin}, _Parent) when is_list(Origin) ->
+    Origin;
+child_module(_, Parent) ->
+    Parent.
+
+leaf_json(Path, Schema, Ctx) ->
+    case read_leaf(Path, Schema) of
+        none ->
+            omit;
+        {ok, Value, Src} ->
+            case keep_value(Value, Src, Schema, Ctx) of
+                false -> omit;
+                true -> encode_value(maps:get(type, Schema), Value)
+            end
+    end.
+
+leaf_list_json(Path, Schema, Ctx) ->
+    {Vals, Src} = read_leaf_list_src(Path, Schema),
+    case Vals of
+        [] ->
+            omit;
+        _ ->
+            case keep_value(Vals, Src, Schema, Ctx) of
+                false ->
+                    omit;
+                true ->
+                    Type = maps:get(type, Schema),
+                    [encode_value(Type, V) || V <- Vals]
+            end
+    end.
+
+keep_value(_Value, default, _Schema, #{defaults := explicit}) ->
+    false;
+keep_value(Value, _Src, Schema, #{defaults := trim}) ->
+    Default = maps:get(default, Schema, undefined),
+    not (Default =/= undefined andalso Value =:= Default);
+keep_value(_Value, _Src, _Schema, _) ->
+    true.
 
 instance_exists(Path, #{node_type := list}) ->
     case lists:reverse(Path) of
@@ -218,28 +266,60 @@ list_keys(Path) ->
     end.
 
 read_leaf(Path, Schema) ->
-    case try_lookup(Path) of
-        {ok, undefined} ->
-            none;
+    case stored_leaf(Path) of
         {ok, Value} ->
-            {ok, Value};
-        _ ->
+            {ok, Value, stored};
+        none ->
             case maps:get(default, Schema, undefined) of
                 undefined -> none;
-                Default -> {ok, Default}
+                Default -> {ok, Default, default}
             end
     end.
 
 read_leaf_list(Path, Schema) ->
-    case try_lookup(Path) of
+    {Vals, _Src} = read_leaf_list_src(Path, Schema),
+    Vals.
+
+read_leaf_list_src(Path, Schema) ->
+    case stored_leaf(Path) of
         {ok, Vals} when is_list(Vals) ->
-            Vals;
+            {Vals, stored};
         _ ->
             case maps:get(default, Schema, undefined) of
-                undefined -> [];
-                Default when is_list(Default) -> Default;
-                _ -> []
+                undefined -> {[], default};
+                Default when is_list(Default) -> {Default, default};
+                _ -> {[], default}
             end
+    end.
+
+%% Config: only rows actually in the DB count as stored (not schema
+%% defaults injected by `mgmtd:lookup/1`). Operational data is stored.
+stored_leaf(Path) ->
+    case try_cfg_lookup(Path) of
+        {ok, Value} ->
+            {ok, Value};
+        none ->
+            case try_lookup(Path) of
+                {ok, undefined} -> none;
+                {ok, Value} ->
+                    case mgmtd_schema:lookup(Path) of
+                        #{config := false} -> {ok, Value};
+                        _ -> none
+                    end;
+                _ ->
+                    none
+            end
+    end.
+
+try_cfg_lookup(Path) ->
+    try mgmtd_cfg_db:lookup(Path) of
+        [#cfg{value = Value}] ->
+            {ok, Value};
+        [] ->
+            none
+    catch
+        error:db_not_initialized -> none;
+        error:badarg -> none
     end.
 
 try_lookup(Path) ->

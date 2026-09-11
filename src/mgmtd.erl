@@ -15,7 +15,7 @@
          registered_schemas/0,
          load_config_db/1]).
 %% Transaction API
--export([txn_new/0, txn_exit/1, txn_set/2, txn_delete/2, txn_show/2, txn_commit/1]).
+-export([txn_new/0, txn_exit/1, txn_set/2, txn_delete/2, txn_show/2, txn_show/3, txn_commit/1]).
 %% Schema API
 -export([schema_children/2, schema_children/3]).
 
@@ -145,8 +145,11 @@ txn_delete(Txn, SchemaPath) ->
     mgmtd_cfg_txn:delete(Txn, SchemaPath).
 
 txn_show(Txn, SchemaPath) ->
+    txn_show(Txn, SchemaPath, #{}).
+
+txn_show(Txn, SchemaPath, Opts) when is_map(Opts) ->
     ?DBG("TXN SHOW ~p~n", [SchemaPath]),
-    Tree = mgmtd_cfg_txn:get_tree(Txn, SchemaPath),
+    Tree = mgmtd_cfg_txn:get_tree(Txn, SchemaPath, Opts),
     {ok, Tree}.
 
 txn_commit(Txn) ->

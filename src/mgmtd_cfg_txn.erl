@@ -22,7 +22,7 @@
 
 -export_type([txn/0]).
 
--export([new/0, exit_txn/1, get/2, get_tree/2, set/3, delete/2, list_keys/3,
+-export([new/0, exit_txn/1, get/2, get_tree/2, get_tree/3, set/3, delete/2, list_keys/3,
          match_object/2, commit/1]).
 
 new() ->
@@ -81,14 +81,25 @@ get(#cfg_txn{ets_copy = Copy}, Path) ->
 %% backend. There is no named ETS table `cfg` — that was leftover from
 %% an earlier ETS-only store. Operational-data paths (`config = false`
 %% with a host `data_callback`) are filled from the provider instead.
-get_tree(undefined, Path) ->
+get_tree(Txn, Path) ->
+    get_tree(Txn, Path, #{}).
+
+get_tree(Txn, Path, Opts) when is_map(Opts) ->
+    case maps:get(defaults, Opts, false) of
+        true ->
+            defaults_tree(Txn, Path);
+        _ ->
+            get_tree_stored(Txn, Path)
+    end.
+
+get_tree_stored(undefined, Path) ->
     case operational_tree(Path) of
         {ok, Tree} ->
             Tree;
         false ->
             get_tree_from(permanent, Path)
     end;
-get_tree(#cfg_txn{ets_copy = Copy}, Path) ->
+get_tree_stored(#cfg_txn{ets_copy = Copy}, Path) ->
     get_tree_from({ets, Copy}, Path).
 
 operational_tree([]) ->
@@ -123,6 +134,116 @@ get_tree_from(Db, Path) ->
 
 %% We don't need the whole tree from the root if the user only requested part of the tree
 %% so just drop nodes higher up the tree
+%% Schema-driven tree with defaults filled in. List instances are only
+%% those that exist; missing defaulted leaves under them are included.
+defaults_tree(Txn, Path) ->
+    ItemPath = to_item_path(Path),
+    walk_children(Txn, ItemPath).
+
+to_item_path([]) ->
+    [];
+to_item_path([#{role := schema} | _] = Path) ->
+    mgmtd_cfg_db:schema_path_to_key(Path);
+to_item_path(Path) when is_list(Path) ->
+    Path.
+
+walk_children(Txn, Parent) ->
+    lists:filtermap(
+      fun(Child) ->
+              case walk_child(Txn, Parent, Child) of
+                  omit -> false;
+                  Entry -> {true, Entry}
+              end
+      end, mgmtd_schema:children(Parent, show)).
+
+walk_child(_Txn, _Parent, #{config := false}) ->
+    omit;
+walk_child(Txn, Parent, #{name := Name, node_type := leaf} = Schema) ->
+    Path = Parent ++ [Name],
+    case leaf_value(Txn, Path, Schema) of
+        none -> omit;
+        {ok, V} -> {Name, {value, V}}
+    end;
+walk_child(Txn, Parent, #{name := Name, node_type := leaf_list} = Schema) ->
+    Path = Parent ++ [Name],
+    case leaf_list_value(Txn, Path, Schema) of
+        [] -> omit;
+        Vals -> {Name, {leaf_list, Vals}}
+    end;
+walk_child(Txn, Parent, #{name := Name, node_type := container}) ->
+    Path = Parent ++ [Name],
+    case walk_children(Txn, Path) of
+        [] -> omit;
+        Kids -> {Name, Kids}
+    end;
+walk_child(Txn, Parent, #{name := Name, node_type := list}) ->
+    Path = Parent ++ [Name],
+    Keys = list_keys_at(Txn, Path),
+    Items =
+        lists:filtermap(
+          fun(Key) ->
+                  case walk_children(Txn, Path ++ [Key]) of
+                      [] -> false;
+                      Kids -> {true, {Key, Kids}}
+                  end
+          end, lists:sort(Keys)),
+    case Items of
+        [] -> omit;
+        _ -> {Name, Items}
+    end;
+walk_child(_Txn, _Parent, _Schema) ->
+    omit.
+
+leaf_value(Txn, Path, Schema) ->
+    case txn_leaf(Txn, Path) of
+        {ok, V} ->
+            {ok, V};
+        none ->
+            case maps:get(default, Schema, undefined) of
+                undefined -> none;
+                Default -> {ok, Default}
+            end
+    end.
+
+leaf_list_value(Txn, Path, Schema) ->
+    case txn_leaf(Txn, Path) of
+        {ok, Vals} when is_list(Vals) ->
+            Vals;
+        _ ->
+            case maps:get(default, Schema, undefined) of
+                undefined -> [];
+                Default when is_list(Default) -> Default;
+                _ -> []
+            end
+    end.
+
+txn_leaf(undefined, Path) ->
+    try mgmtd:lookup(Path) of
+        {ok, undefined} -> none;
+        {ok, V} -> {ok, V};
+        {error, _} -> none
+    catch
+        _:_ -> none
+    end;
+txn_leaf(#cfg_txn{ets_copy = Copy}, Path) ->
+    case ets:lookup(Copy, Path) of
+        [#cfg{value = V}] -> {ok, V};
+        [] -> none
+    end.
+
+list_keys_at(#cfg_txn{} = Txn, Path) ->
+    [K || K <- list_keys(Txn, Path, '$1'), is_tuple(K)];
+list_keys_at(undefined, Path) ->
+    try mgmtd:lookup(Path) of
+        {ok, Keys} when is_list(Keys) ->
+            [K || K <- Keys, is_tuple(K)];
+        _ ->
+            []
+    catch
+        _:_ ->
+            []
+    end.
+
 drop_path_prefix(Path, [#cfg{path = FullPath, node_type = Leaf} = Cfg]) when Leaf == leaf; Leaf == leaf_list ->
     %% For a single leaf keep one parent - the name of the leaf itself
     PathLen = length(Path) - 1,

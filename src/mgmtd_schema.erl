@@ -571,6 +571,7 @@ schema_to_map(#schema{path = {Path, Ns}} = S, CmdType) ->
       cmd_type => CmdType,
       has_list => S#schema.has_list,
       opts => S#schema.opts,
+      origin_module => proplists:get_value(origin_module, S#schema.opts, undefined),
       children => fun(ChildPath) -> children(ChildPath, CmdType) end }.
 
 %% @doc Operational-data provider module named as `data_callback` on a

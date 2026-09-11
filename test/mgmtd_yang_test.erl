@@ -266,9 +266,12 @@ remote_augment_load_test() ->
     lists:foreach(fun mgmtd:remove_schema/1, mgmtd:registered_schemas()),
     ok = mgmtd:load_yang_module("test/yang/example-base.yang"),
     ok = mgmtd:load_yang_module("test/yang/example-remote-aug.yang"),
-    #{node_type := leaf, type := uint8, default := 1} =
+    #{node_type := leaf, type := uint8, default := 1,
+      origin_module := "example-remote-aug"} =
         mgmtd_schema:lookup(["base", "root", "y"]),
     #{node_type := leaf, type := string} =
+        mgmtd_schema:lookup(["base", "root", "x"]),
+    #{origin_module := undefined} =
         mgmtd_schema:lookup(["base", "root", "x"]),
     ok = mgmtd:remove_schema(base),
     ok = mgmtd:remove_schema(ra).

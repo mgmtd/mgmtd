@@ -46,6 +46,7 @@ list_item_test_() ->
       fun create_list_item_keys_only_idempotent/0,
       fun create_list_item_keys_only_invalid_keys/0,
       fun show_committed_without_txn/0,
+      fun show_defaults_fills_schema_defaults/0,
       fun delete_then_readd_same_key_in_one_txn/0
      ]}.
 
@@ -240,6 +241,11 @@ show_committed_without_txn() ->
     ?assertMatch([{"servers", _}], Subtree),
 
     {ok, _} = txn_delete_commit(Txn2, ["server", "servers", {"web1"}]).
+
+show_defaults_fills_schema_defaults() ->
+    {ok, Tree} = mgmtd:txn_show(undefined, [], #{defaults => true}),
+    Iface = proplists:get_value("interface", Tree),
+    ?assertEqual({value, "1GbE"}, proplists:get_value("speed", Iface)).
 
 %% Delete a list item then create it again with different leaves in the
 %% same session. Commit must keep the re-add, not replay newest-first

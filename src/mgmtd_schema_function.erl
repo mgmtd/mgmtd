@@ -1,6 +1,7 @@
 -module(mgmtd_schema_function).
 
--export([load/2, load_node/4, load_node/5, load_resolved/3, load_resolved_at/4]).
+-export([load/2, load_node/4, load_node/5, load_resolved/3,
+         load_resolved_at/4, load_resolved_at/5]).
 
 -include("../include/mgmtd.hrl").
 -include("mgmtd_schema.hrl").
@@ -125,39 +126,42 @@ load_resolved(Prefix, Nodes, Callback) ->
 
 %% Insert compiled nodes as children of an existing schema path (remote augment).
 load_resolved_at(Prefix, ParentPath, Nodes, Callback) ->
+    load_resolved_at(Prefix, ParentPath, Nodes, Callback, undefined).
+
+load_resolved_at(Prefix, ParentPath, Nodes, Callback, OriginModule) ->
     case ets:lookup(mgmtd_commands, {ParentPath, Prefix}) of
         [] ->
             {error, {augment_target_missing, ParentPath, Prefix}};
         [_] ->
             Rev = lists:reverse(ParentPath),
             lists:foreach(fun(Child) ->
-                                  load_node_resolved(Child, Rev, Prefix, Callback)
+                                  load_node_resolved(Child, Rev, Prefix, Callback, OriginModule)
                           end, Nodes),
             ok
     end.
 
 load_nodes_resolved(?DEFAULT_NS, Nodes, Callback) ->
     lists:foreach(fun(Child) ->
-                          load_node_resolved(Child, [], ?DEFAULT_NS, Callback)
+                          load_node_resolved(Child, [], ?DEFAULT_NS, Callback, undefined)
                   end, Nodes);
 load_nodes_resolved(Prefix, Nodes, Callback) ->
     Name = atom_to_list(Prefix),
     case ets:lookup(mgmtd_commands, {[Name], Prefix}) of
         [] ->
             Root = (mgmtd_schema:prefix_container(Prefix, Nodes))#container{config = true},
-            load_node_resolved(Root, [], Prefix, Callback);
+            load_node_resolved(Root, [], Prefix, Callback, undefined);
         [_] ->
             lists:foreach(fun(Child) ->
-                                  load_node_resolved(Child, [Name], Prefix, Callback)
+                                  load_node_resolved(Child, [Name], Prefix, Callback, undefined)
                           end, Nodes)
     end.
 
-load_resolved_children(Fun, Path, Ns, Callback) ->
+load_resolved_children(Fun, Path, Ns, Callback, Origin) ->
     lists:foreach(fun(Child) ->
-                          load_node_resolved(Child, Path, Ns, Callback)
+                          load_node_resolved(Child, Path, Ns, Callback, Origin)
                   end, Fun()).
 
-load_node_resolved(#container{name = Name, desc = Desc, config = Config} = Node, Path, Ns, ParentCb) ->
+load_node_resolved(#container{name = Name, desc = Desc, config = Config} = Node, Path, Ns, ParentCb, Origin) ->
     Callback = mgmtd_schema:resolve_data_callback(Node#container.data_callback, ParentCb, Config),
     FullPath = lists:reverse([Name | Path]),
     Container =
@@ -168,10 +172,10 @@ load_node_resolved(#container{name = Name, desc = Desc, config = Config} = Node,
                 desc = Desc,
                 data_callback = Callback,
                 config = Config,
-                opts = Node#container.opts},
+                opts = origin_opts(Node#container.opts, Origin)},
     true = ets:insert_new(mgmtd_commands, Container),
-    load_resolved_children(Node#container.children, [Name | Path], Ns, Callback);
-load_node_resolved(#list{name = Name, desc = Desc, key_names = KeyNames, config = Config} = Node, Path, Ns, ParentCb) ->
+    load_resolved_children(Node#container.children, [Name | Path], Ns, Callback, Origin);
+load_node_resolved(#list{name = Name, desc = Desc, key_names = KeyNames, config = Config} = Node, Path, Ns, ParentCb, Origin) ->
     Callback = mgmtd_schema:resolve_data_callback(Node#list.data_callback, ParentCb, Config),
     assert_key_names(KeyNames, Node#list.children),
     FullPath = lists:reverse([Name | Path]),
@@ -187,11 +191,11 @@ load_node_resolved(#list{name = Name, desc = Desc, key_names = KeyNames, config 
                 max_elements = Node#list.max_elements,
                 has_list = true,
                 config = Config,
-                opts = Node#list.opts},
+                opts = origin_opts(Node#list.opts, Origin)},
     true = ets:insert_new(mgmtd_commands, List),
     ok = mgmtd_schema:mark_has_list_descendent(Ns, Path),
-    load_resolved_children(Node#list.children, [Name | Path], Ns, Callback);
-load_node_resolved(#leaf{name = Name, desc = Desc, type = Type, default = Default, config = Config} = Node, Path, Ns, ParentCb) ->
+    load_resolved_children(Node#list.children, [Name | Path], Ns, Callback, Origin);
+load_node_resolved(#leaf{name = Name, desc = Desc, type = Type, default = Default, config = Config} = Node, Path, Ns, ParentCb, Origin) ->
     Callback = mgmtd_schema:resolve_data_callback(Node#leaf.data_callback, ParentCb, Config),
     FullPath = lists:reverse([Name | Path]),
     Pattern = proplists:get_value(pattern, Node#leaf.opts, undefined),
@@ -207,9 +211,9 @@ load_node_resolved(#leaf{name = Name, desc = Desc, type = Type, default = Defaul
                 data_callback = Callback,
                 pattern = Pattern,
                 config = Config,
-                opts = Node#leaf.opts},
+                opts = origin_opts(Node#leaf.opts, Origin)},
     true = ets:insert_new(mgmtd_commands, Leaf);
-load_node_resolved(#leaf_list{name = Name, desc = Desc, type = Type, config = Config} = Node, Path, Ns, ParentCb) ->
+load_node_resolved(#leaf_list{name = Name, desc = Desc, type = Type, config = Config} = Node, Path, Ns, ParentCb, Origin) ->
     Callback = mgmtd_schema:resolve_data_callback(Node#leaf_list.data_callback, ParentCb, Config),
     FullPath = lists:reverse([Name | Path]),
     LeafList =
@@ -223,8 +227,18 @@ load_node_resolved(#leaf_list{name = Name, desc = Desc, type = Type, config = Co
                 min_elements = Node#leaf_list.min_elements,
                 max_elements = Node#leaf_list.max_elements,
                 config = Config,
-                opts = Node#leaf_list.opts},
+                opts = origin_opts(Node#leaf_list.opts, Origin)},
     true = ets:insert_new(mgmtd_commands, LeafList).
+
+origin_opts(Opts, undefined) ->
+    Opts;
+origin_opts(Opts, Origin) ->
+    case lists:keyfind(origin_module, 1, Opts) of
+        false ->
+            [{origin_module, Origin} | Opts];
+        _ ->
+            Opts
+    end.
 
 assert_key_names(KeyNames, ChildrenFun) ->
     Children = ChildrenFun(),

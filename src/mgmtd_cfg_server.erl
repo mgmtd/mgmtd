@@ -17,6 +17,7 @@
          new_txn/0,
          exit_txn/1,
          commit/1,
+         etag/0,
          subscribe/2,
          unsubscribe/1,
          show_subscriptions/0, subscriptions/0]).
@@ -30,7 +31,8 @@
 -record(state, {
                 subs = ets:new(subscriptions, []),
                 sub_pids = ets:new(sub_pids, [bag]),
-                sub_refs = ets:new(sub_refs, [])
+                sub_refs = ets:new(sub_refs, []),
+                etag = 0
                }).
 
 %%%===================================================================
@@ -73,6 +75,13 @@ exit_txn(Txn) ->
 
 commit(Txn) ->
     gen_server:call(?SERVER, {commit, Txn}).
+
+etag() ->
+    try gen_server:call(?SERVER, etag) of
+        N when is_integer(N) -> N
+    catch
+        _:_ -> 0
+    end.
 
 %%%===================================================================
 %%% gen_server callbacks
@@ -152,10 +161,13 @@ handle_call({commit, Txn}, _From, State) ->
     case mgmtd_cfg_txn:commit(Txn) of
         {ok, Txn2} ->
             send_subscription_messages(Messages),
-            {reply, {ok, Txn2}, State};
+            Etag = State#state.etag + 1,
+            {reply, {ok, Txn2}, State#state{etag = Etag}};
         Err ->
             {reply, Err, State}
     end;
+handle_call(etag, _From, State) ->
+    {reply, State#state.etag, State};
 handle_call(_Request, _From, State) ->
     Reply = ok,
     {reply, Reply, State}.
