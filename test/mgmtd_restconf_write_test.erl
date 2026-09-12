@@ -36,8 +36,8 @@ setup() ->
     ok = file:write_file(File, json_schema()),
     ok = mgmtd:load_json_schema(File, #{namespace => js, config => true}),
     ok = mgmtd_cfg_db:init(?DB, [{backend, mnesia}]),
-    Prev = application:get_env(mgmtd, restconf_port),
-    ok = application:set_env(mgmtd, restconf_port, 0),
+    Prev = application:get_env(mgmtd, restconf),
+    ok = application:set_env(mgmtd, restconf, [{enabled, true}, {port, 0}]),
     ok = mgmtd_restconf:start(),
     {ok, _} = application:ensure_all_started(inets),
     Prev.
@@ -45,8 +45,8 @@ setup() ->
 teardown(Prev) ->
     ok = mgmtd_restconf:stop(),
     case Prev of
-        undefined -> application:unset_env(mgmtd, restconf_port);
-        {ok, Port} -> application:set_env(mgmtd, restconf_port, Port)
+        undefined -> application:unset_env(mgmtd, restconf);
+        {ok, Val} -> application:set_env(mgmtd, restconf, Val)
     end,
     file:delete(json_file()),
     lists:foreach(fun mgmtd:remove_schema/1, mgmtd:registered_schemas()),

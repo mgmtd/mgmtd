@@ -1,13 +1,17 @@
 %%%-------------------------------------------------------------------
 %% @doc RESTCONF HTTP listener (RFC 8040).
 %%
-%% Step one: Cowboy on `restconf_port` (default 8008). Protocol
-%% handlers are still stubs.
+%% sys.config (`mgmtd`):
+%%
+%%     {restconf, [{enabled, true}, {port, 8008}]}
+%%
+%% `enabled` defaults to true. `{restconf, false}` leaves the HTTP
+%% listener off; `{restconf, true}` is the default port.
 %% @end
 %%%-------------------------------------------------------------------
 -module(mgmtd_restconf).
 
--export([start/0, stop/0, port/0, default_port/0]).
+-export([start/0, stop/0, port/0, default_port/0, enabled/0]).
 
 -define(LISTENER, mgmtd_restconf_http).
 -define(DEFAULT_PORT, 8008).
@@ -16,8 +20,36 @@
 default_port() ->
     ?DEFAULT_PORT.
 
+-spec enabled() -> boolean().
+enabled() ->
+    proplists:get_value(enabled, config(), true).
+
 -spec start() -> ok | {error, term()}.
 start() ->
+    case enabled() of
+        false ->
+            ok;
+        true ->
+            start_listener()
+    end.
+
+-spec stop() -> ok.
+stop() ->
+    try cowboy:stop_listener(?LISTENER) of
+        ok ->
+            ok;
+        {error, not_found} ->
+            ok
+    catch
+        _:_ ->
+            ok
+    end.
+
+-spec port() -> inet:port_number().
+port() ->
+    ranch:get_port(?LISTENER).
+
+start_listener() ->
     {ok, _} = application:ensure_all_started(cowboy),
     Dispatch = cowboy_router:compile(
                  [{'_', [
@@ -35,18 +67,15 @@ start() ->
             {error, Reason}
     end.
 
--spec stop() -> ok.
-stop() ->
-    case cowboy:stop_listener(?LISTENER) of
-        ok ->
-            ok;
-        {error, not_found} ->
-            ok
-    end.
-
--spec port() -> inet:port_number().
-port() ->
-    ranch:get_port(?LISTENER).
-
 listen_port() ->
-    application:get_env(mgmtd, restconf_port, ?DEFAULT_PORT).
+    proplists:get_value(port, config(), ?DEFAULT_PORT).
+
+config() ->
+    case application:get_env(mgmtd, restconf, []) of
+        true ->
+            [{enabled, true}];
+        false ->
+            [{enabled, false}];
+        List when is_list(List) ->
+            List
+    end.

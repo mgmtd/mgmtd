@@ -9,6 +9,12 @@
 default_port_test() ->
     ?assertEqual(8008, mgmtd_restconf:default_port()).
 
+config_test_() ->
+    {setup, fun save_env/0, fun restore_env/1,
+     [fun boolean_false_disables/0,
+      fun disabled_does_not_listen/0,
+      fun port_from_config/0]}.
+
 listener_test_() ->
     {setup, fun setup/0, fun teardown/1,
      [fun host_meta_advertises_restconf/0,
@@ -22,20 +28,45 @@ listener_test_() ->
       fun unknown_path_is_not_found/0]}.
 
 setup() ->
-    Prev = application:get_env(mgmtd, restconf_port),
-    ok = application:set_env(mgmtd, restconf_port, 0),
+    Prev = save_env(),
+    ok = application:set_env(mgmtd, restconf, [{enabled, true}, {port, 0}]),
     ok = mgmtd_restconf:start(),
     {ok, _} = application:ensure_all_started(inets),
     Prev.
 
 teardown(Prev) ->
+    restore_env(Prev).
+
+save_env() ->
+    ok = mgmtd_restconf:stop(),
+    application:get_env(mgmtd, restconf).
+
+restore_env(Prev) ->
     ok = mgmtd_restconf:stop(),
     case Prev of
         undefined ->
-            application:unset_env(mgmtd, restconf_port);
-        {ok, Port} ->
-            application:set_env(mgmtd, restconf_port, Port)
+            application:unset_env(mgmtd, restconf);
+        {ok, Val} ->
+            application:set_env(mgmtd, restconf, Val)
     end.
+
+boolean_false_disables() ->
+    ok = application:set_env(mgmtd, restconf, false),
+    ?assertEqual(false, mgmtd_restconf:enabled()).
+
+disabled_does_not_listen() ->
+    ok = application:set_env(mgmtd, restconf, [{enabled, false}, {port, 0}]),
+    ?assertEqual(false, mgmtd_restconf:enabled()),
+    ?assertEqual(ok, mgmtd_restconf:start()),
+    ?assertError(_, mgmtd_restconf:port()).
+
+port_from_config() ->
+    ok = application:set_env(mgmtd, restconf, [{enabled, true}, {port, 0}]),
+    ?assertEqual(true, mgmtd_restconf:enabled()),
+    ?assertEqual(ok, mgmtd_restconf:start()),
+    Port = mgmtd_restconf:port(),
+    ?assert(is_integer(Port) andalso Port > 0),
+    ok = mgmtd_restconf:stop().
 
 host_meta_advertises_restconf() ->
     {Code, Headers, Body} = http_get("/.well-known/host-meta"),

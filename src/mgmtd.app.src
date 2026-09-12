@@ -10,7 +10,7 @@
     json_polyfill,
     cowboy
    ]},
-  {env, [{restconf_port, 8008}]},
+  {env, [{restconf, [{enabled, false}, {port, 8008}]}]},
   {modules, []},
 
   {licenses, ["Apache 2.0"]},
