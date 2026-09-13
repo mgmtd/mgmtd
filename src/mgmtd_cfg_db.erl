@@ -12,7 +12,8 @@
 
 -export([init/2, remove_db/2, transaction/1, copy_to_ets/0, replace_all/1]).
 
--export([insert_path_items/3, check_conflict/3, delete_path_items/2]).
+-export([insert_path_items/3, check_conflict/3, delete_path_items/2,
+         move_item/3]).
 
 -export([cfg_list_to_tree/1, simplify_tree/1, schema_path_to_key/1]).
 
@@ -25,10 +26,7 @@
 %% engine
 %%--------------------------------------------------------------------
 
-%%--------------------------------------------------------------------
-%% @doc Called once at startup to allow the chosen database backend to
-%% create tables etc.
-%% --------------------------------------------------------------------
+%% @doc Called once at startup so the chosen database backend can create tables.
 -spec init(file:filename(), proplists:proplist()) -> ok | {error, term()}.
 init(DbLocation, Opts) ->
     Backend = proplists:get_value(backend, Opts, mnesia),
@@ -131,9 +129,10 @@ list_keys(Path, Pattern) ->
 
 list_keys(permanent, Path, Pattern) ->
     BackendMod = backend(),
-    BackendMod:select(Path, Pattern);
+    order_keys(permanent, Path, Pattern, BackendMod:select(Path, Pattern));
 list_keys({ets, Ets}, Path, Pattern) ->
-    ets:select(Ets, [{#cfg{path = mgmtd_schema:ets_pat(Path ++ [Pattern]), _ = mgmtd_schema:ets_pat('_')}, [], ['$1']}]).
+    Raw = ets:select(Ets, [{#cfg{path = mgmtd_schema:ets_pat(Path ++ [Pattern]), _ = mgmtd_schema:ets_pat('_')}, [], ['$1']}]),
+    order_keys({ets, Ets}, Path, Pattern, Raw).
 
 copy_to_ets() ->
     BackendMod = backend(),
@@ -234,13 +233,10 @@ insert_path_items(Db, [I | Is], Value, Path) ->
 
         %% List items
         #{role := schema, node_type := list, name := Name,
-          key_names := Keys, key_values := KVs} ->
+          key_names := Keys, key_values := KVs} = I ->
             FullPath = Path ++ [Name],
             Key = list_to_tuple(KVs),
-            ListItemCfg = schema_to_cfg(I, FullPath, Keys),
-
-            %% Create a top level entry for the list schema itself
-            write(Db, ListItemCfg),
+            write_list_node(Db, I, FullPath, Name, Keys, Key),
             ListItemsPath = FullPath ++ [Key],
 
             %% Create an entry for the list key
@@ -352,7 +348,8 @@ delete_path_items_all(_Db, []) ->
 delete_path_items_all(Db, [I|Is]) ->
     case I of
         #{role := schema, node_type := list, path := Path, key_values := KVs} ->
-            ListItemPath = Path ++ [list_to_tuple(KVs)],
+            Key = list_to_tuple(KVs),
+            ListItemPath = Path ++ [Key],
             Pattern = #cfg{path = mgmtd_schema:ets_tail(ListItemPath), _ = mgmtd_schema:ets_pat('_')},
             ok = match_delete(Db, Pattern),
             %% See if we can also delete the list node, Check if there are any remaining list items
@@ -361,7 +358,7 @@ delete_path_items_all(Db, [I|Is]) ->
                 [] ->
                     ok = delete(Db, Path);
                 [_|_] ->
-                    ok
+                    remove_from_order(Db, Path, Key)
             end,
             delete_path_items_all(Db, Is);
         #{role := schema, node_type := container, path := Path} ->
@@ -438,7 +435,9 @@ schema_path_to_key(Path) ->
 %% -------------------------------------------------------------------
 -spec cfg_list_to_tree([#cfg{}]) -> [#cfg{}].
 cfg_list_to_tree(Cfgs) ->
-    cfg_list_to_tree(Cfgs, mgmtd_zntrees:root(root)).
+    Orders = maps:from_list(
+               [{P, Ks} || #cfg{node_type = list, path = P, value = {ordered, Ks}} <- Cfgs]),
+    reorder_cfg_tree(cfg_list_to_tree(Cfgs, mgmtd_zntrees:root(root)), Orders).
 
 cfg_list_to_tree([Cfg|Cfgs], Z) ->
     Z1 = zntree_insert_item(Cfg, mgmtd_zntrees:children(Z)),
@@ -513,5 +512,215 @@ simplify_tree([#cfg{node_type = leaf, name = Name, value = Value} | Cfgs]) ->
     [{Name, {value, Value}}|simplify_tree(Cfgs)];
 simplify_tree([]) ->
     [].
+
+%%--------------------------------------------------------------------
+%% ordered-by user
+%%
+%% User order is stored on the list node's `#cfg.value` as
+%% `{ordered, [KeyTuple, ...]}`. System-ordered lists keep `value` as
+%% the key names (legacy) and are returned in backend path order.
+%%--------------------------------------------------------------------
+
+-spec move_item(permanent | {ets, ets:table()}, item_path(),
+                first | last | {before, term()} | {'after', term()}) ->
+          {ok, list()} | {error, term()}.
+move_item(Db, ItemPath, Where) ->
+    case move_target(ItemPath) of
+        {error, _} = Err ->
+            Err;
+        {list, ListPath, Key} ->
+            move_list_item(Db, ListPath, Key, Where);
+        {leaf_list, Path, Val} ->
+            move_leaf_list(Db, Path, Val, Where)
+    end.
+
+write_list_node(Db, Schema, FullPath, Name, KeyNames, Key) ->
+    case mgmtd_schema:ordered_by(Schema) of
+        user ->
+            NewOrder = case read(Db, FullPath) of
+                           [#cfg{value = {ordered, Keys}}] ->
+                               place_last(Keys, Key);
+                           [#cfg{node_type = list}] ->
+                               place_last(raw_child_keys(Db, FullPath), Key);
+                           [] ->
+                               [Key]
+                       end,
+            write(Db, #cfg{node_type = list, name = Name, path = FullPath,
+                           value = {ordered, NewOrder}});
+        system ->
+            write(Db, #cfg{node_type = list, name = Name, path = FullPath,
+                           value = KeyNames})
+    end.
+
+remove_from_order(Db, ListPath, Key) ->
+    case read(Db, ListPath) of
+        [#cfg{value = {ordered, Keys}} = Cfg] ->
+            write(Db, Cfg#cfg{value = {ordered, lists:delete(Key, Keys)}});
+        _ ->
+            ok
+    end.
+
+order_keys(Db, Path, Pattern, Raw) ->
+    case lookup(Db, Path) of
+        [#cfg{node_type = list, value = {ordered, Order}}] ->
+            apply_order(Order, Pattern, Raw);
+        _ ->
+            Raw
+    end.
+
+%% `Raw` is whatever `select` bound: full key tuples for `'$1'`, or the
+%% `'$1'` element for a tuple match (`{'$1'}` from ecli completion).
+apply_order(Order, Pattern, Raw) ->
+    Set = maps:from_list([{V, true} || V <- Raw]),
+    Ordered = [V || K <- Order,
+                    {true, V} <- [match_key(Pattern, K)],
+                    maps:is_key(V, Set)],
+    Extra = [V || V <- Raw, not lists:member(V, Ordered)],
+    Ordered ++ Extra.
+
+%% Same contract as the ecli list-key match: `'$1'` is the full key,
+%% a tuple binds `'$1'` to that element.
+match_key('$1', Key) ->
+    {true, Key};
+match_key(Pattern, Key)
+  when is_tuple(Pattern), is_tuple(Key),
+       tuple_size(Pattern) =:= tuple_size(Key) ->
+    match_elements(tuple_to_list(Pattern), tuple_to_list(Key), undefined);
+match_key(_, _) ->
+    false.
+
+match_elements(['$1' | Ps], [V | Ks], undefined) ->
+    match_elements(Ps, Ks, V);
+match_elements(['_' | Ps], [_ | Ks], Acc) ->
+    match_elements(Ps, Ks, Acc);
+match_elements([P | Ps], [P | Ks], Acc) ->
+    match_elements(Ps, Ks, Acc);
+match_elements([], [], Acc) ->
+    {true, Acc};
+match_elements(_, _, _) ->
+    false.
+
+raw_child_keys(Db, Path) ->
+    Pattern = #cfg{path = mgmtd_schema:ets_tail(Path),
+                   node_type = list_key,
+                   _ = mgmtd_schema:ets_pat('_')},
+    [lists:last(P) || #cfg{path = P} <- match(Db, Pattern)].
+
+move_target(ItemPath) ->
+    move_target_rev(lists:reverse(ItemPath)).
+
+move_target_rev([Key | Rest]) when is_tuple(Key) ->
+    Parent = lists:reverse(Rest),
+    case mgmtd_schema:lookup(Parent) of
+        #{node_type := list} = Schema ->
+            case mgmtd_schema:ordered_by(Schema) of
+                user -> {list, Parent, Key};
+                system -> {error, {not_user_ordered, Parent}}
+            end;
+        #{node_type := leaf_list} = Schema ->
+            case mgmtd_schema:ordered_by(Schema) of
+                user ->
+                    Val = case Key of {V} -> V; V -> V end,
+                    {leaf_list, Parent, Val};
+                system ->
+                    {error, {not_user_ordered, Parent}}
+            end;
+        _ ->
+            move_target_rev(Rest)
+    end;
+move_target_rev([_ | Rest]) ->
+    move_target_rev(Rest);
+move_target_rev([]) ->
+    {error, not_ordered_list}.
+
+move_list_item(Db, ListPath, Key, Where) ->
+    case read(Db, ListPath) of
+        [#cfg{value = {ordered, Keys}} = Cfg] ->
+            case lists:member(Key, Keys) of
+                false ->
+                    {error, {list_entry_not_found, Key}};
+                true ->
+                    case place_at(Keys, Key, Where) of
+                        {ok, New} ->
+                            write(Db, Cfg#cfg{value = {ordered, New}}),
+                            {ok, New};
+                        {error, _} = Err ->
+                            Err
+                    end
+            end;
+        _ ->
+            {error, {list_entry_not_found, Key}}
+    end.
+
+move_leaf_list(Db, Path, Val, Where) ->
+    case read(Db, Path) of
+        [#cfg{node_type = leaf_list, value = Vals} = Cfg] when is_list(Vals) ->
+            case lists:member(Val, Vals) of
+                false ->
+                    {error, {list_entry_not_found, Val}};
+                true ->
+                    case place_at(Vals, Val, Where) of
+                        {ok, New} ->
+                            write(Db, Cfg#cfg{value = New}),
+                            {ok, New};
+                        {error, _} = Err ->
+                            Err
+                    end
+            end;
+        _ ->
+            {error, {list_entry_not_found, Val}}
+    end.
+
+place_last(Keys, Key) ->
+    case lists:member(Key, Keys) of
+        true -> Keys;
+        false -> Keys ++ [Key]
+    end.
+
+place_at(Keys, Key, first) ->
+    {ok, [Key | lists:delete(Key, Keys)]};
+place_at(Keys, Key, last) ->
+    {ok, lists:delete(Key, Keys) ++ [Key]};
+place_at(Keys, Key, {before, Point}) when Key =:= Point ->
+    {ok, Keys};
+place_at(Keys, Key, {'after', Point}) when Key =:= Point ->
+    {ok, Keys};
+place_at(Keys, Key, {before, Point}) ->
+    insert_relative(lists:delete(Key, Keys), Key, Point, before);
+place_at(Keys, Key, {'after', Point}) ->
+    insert_relative(lists:delete(Key, Keys), Key, Point, 'after');
+place_at(_Keys, _Key, Other) ->
+    {error, {invalid_insert, Other}}.
+
+insert_relative(Keys, Key, Point, Side) ->
+    case lists:splitwith(fun(K) -> K =/= Point end, Keys) of
+        {_, []} ->
+            {error, {point_not_found, Point}};
+        {Pre, [P | Post]} when Side =:= before ->
+            {ok, Pre ++ [Key, P | Post]};
+        {Pre, [P | Post]} when Side =:= 'after' ->
+            {ok, Pre ++ [P, Key | Post]}
+    end.
+
+reorder_cfg_tree(Nodes, Orders) ->
+    [reorder_cfg_node(N, Orders) || N <- Nodes].
+
+reorder_cfg_node(#cfg{node_type = list, path = Path, value = Children} = C, Orders)
+  when is_list(Children) ->
+    Kids = reorder_cfg_tree(Children, Orders),
+    C#cfg{value = sort_list_key_rows(Kids, maps:get(Path, Orders, undefined))};
+reorder_cfg_node(#cfg{node_type = NT, value = Children} = C, Orders)
+  when (NT =:= container orelse NT =:= list_key), is_list(Children) ->
+    C#cfg{value = reorder_cfg_tree(Children, Orders)};
+reorder_cfg_node(C, _Orders) ->
+    C.
+
+sort_list_key_rows(Kids, undefined) ->
+    Kids;
+sort_list_key_rows(Kids, Order) ->
+    ByName = maps:from_list([{N, K} || #cfg{name = N} = K <- Kids]),
+    Ordered = [maps:get(K, ByName) || K <- Order, maps:is_key(K, ByName)],
+    Extra = [K || #cfg{name = N} = K <- Kids, not lists:member(N, Order)],
+    Ordered ++ Extra.
 
 

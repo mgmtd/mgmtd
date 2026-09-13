@@ -501,6 +501,7 @@ compile_node_feature(list, Ln, Arg, Sub, Ctx) ->
                                        key_names = Keys,
                                        min_elements = min_elements(Sub),
                                        max_elements = max_elements(Sub),
+                                       ordered_by = ordered_by_of(Sub),
                                        config = Config,
                                        children = fun() -> Children end,
                                        opts = node_opts(Sub)}}
@@ -541,6 +542,7 @@ compile_node_feature('leaf-list', Ln, Arg, Sub, Ctx) ->
                                     config = Config,
                                     min_elements = min_elements(Sub),
                                     max_elements = max_elements(Sub),
+                                    ordered_by = ordered_by_of(Sub),
                                     opts = node_opts(Sub)}};
                 Error ->
                     prepend_error(Error, Ln, Arg)
@@ -1468,6 +1470,14 @@ node_opts(Sub) ->
                    presence_opt(Sub),
                    pattern_opt(Sub),
                    if_feature_opt(Sub)]).
+
+%% RFC 7950 §7.7.5 / §7.8.7. Default is system. Only `user` is special.
+ordered_by_of(Sub) ->
+    case find_arg('ordered-by', Sub) of
+        user -> user;
+        <<"user">> -> user;
+        _ -> system
+    end.
 
 must_opts(Sub) ->
     [{must, #{expr => arg_str(Arg),

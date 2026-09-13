@@ -982,11 +982,12 @@ emit_children(Parent, Rows, Parents, Pos, Index) ->
 
 emit_kids([], _Rows, _Parents, Pos, Index) ->
     {[], Index, Pos};
-emit_kids([#cfg{node_type = list, name = Name, path = Path} | Rest],
+emit_kids([#cfg{node_type = list, name = Name, path = Path, value = Val} | Rest],
           Rows, Parents, Pos, Index) ->
-    Keys = [C || #cfg{node_type = list_key, path = P} = C <- Rows,
-                 length(P) =:= length(Path) + 1,
-                 lists:prefix(Path, P)],
+    Keys0 = [C || #cfg{node_type = list_key, path = P} = C <- Rows,
+                  length(P) =:= length(Path) + 1,
+                  lists:prefix(Path, P)],
+    Keys = order_key_rows(Val, Keys0),
     {Els1, Index1, Pos1} = emit_list_keys(Name, Keys, Rows, Parents, Pos, Index),
     {Els2, Index2, Pos2} = emit_kids(Rest, Rows, Parents, Pos1, Index1),
     {Els1 ++ Els2, Index2, Pos2};
@@ -1012,6 +1013,15 @@ emit_kids([#cfg{node_type = Leaf, name = Name, path = Path, value = Value} | Res
     {Els1 ++ Els2, Index2, Pos2};
 emit_kids([_ | Rest], Rows, Parents, Pos, Index) ->
     emit_kids(Rest, Rows, Parents, Pos, Index).
+
+order_key_rows({ordered, Order}, KeyRows) ->
+    ByKey = maps:from_list([{lists:last(P), C} || #cfg{path = P} = C <- KeyRows]),
+    Ordered = [maps:get(K, ByKey) || K <- Order, maps:is_key(K, ByKey)],
+    Extra = [C || #cfg{path = P} = C <- KeyRows,
+                  not lists:member(lists:last(P), Order)],
+    Ordered ++ Extra;
+order_key_rows(_, KeyRows) ->
+    KeyRows.
 
 emit_list_keys(_Name, [], _Rows, _Parents, Pos, Index) ->
     {[], Index, Pos};

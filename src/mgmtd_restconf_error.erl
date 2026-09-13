@@ -27,7 +27,7 @@ encode(Err) ->
                     Error0#{<<"error-path">> => to_bin(Path)}
             end,
     iolist_to_binary(
-      json:encode(#{<<"ietf-restconf:errors">> =>
+      mgmtd_json:encode(#{<<"ietf-restconf:errors">> =>
                         #{<<"error">> => [Error]}})).
 
 type(#{type := Type}) ->

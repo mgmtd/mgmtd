@@ -71,6 +71,7 @@ list_keys_and_leaf_types() ->
     Servers = find(<<"name">>, <<"servers">>, maps:get(<<"children">>, Server)),
     ?assertEqual(<<"list">>, maps:get(<<"kind">>, Servers)),
     ?assertEqual([<<"name">>], maps:get(<<"key_names">>, Servers)),
+    ?assertEqual(<<"system">>, maps:get(<<"ordered_by">>, Servers)),
     ?assertEqual(<<"/restconf/data/default:server/servers">>,
                  maps:get(<<"path">>, Servers)),
     Port = find(<<"name">>, <<"port">>, maps:get(<<"children">>, Servers)),
@@ -99,7 +100,7 @@ http_get_schema() ->
     ?assertEqual(200, Code),
     CT = proplists:get_value("content-type", Headers),
     ?assert(is_list(CT) andalso string:prefix(CT, "application/json") =/= nomatch),
-    #{<<"modules">> := [Default]} = json:decode(Body),
+    #{<<"modules">> := [Default]} = mgmtd_json:decode(Body),
     true = is_map(Default),
     ?assertEqual(<<"default">>, maps:get(<<"name">>, Default)),
     lists:foreach(fun mgmtd:remove_schema/1, mgmtd:registered_schemas()).

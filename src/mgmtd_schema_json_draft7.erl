@@ -13,7 +13,7 @@ load_file(File) ->
 
 load_file(File, Opts) ->
     {ok, Bin} = file:read_file(File),
-    Schema = json:decode(Bin),
+    Schema = mgmtd_json:decode(Bin),
     load_json_schema(Schema, maps:merge(#{config => false}, Opts)).
 
 load_json_schema(#{<<"$schema">> := ?DRAFT7_SCHEMA} = Schema, Opts) ->

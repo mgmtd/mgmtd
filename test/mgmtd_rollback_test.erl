@@ -1,11 +1,14 @@
 -module(mgmtd_rollback_test).
 
 -include_lib("eunit/include/eunit.hrl").
+-include("../src/mgmtd_schema.hrl").
 
 -define(MNESIA_DIR, "test_db_rollback_mnesia").
 -define(SYS_DIR, "test_db_rollback_sys").
 -define(CAP_DIR, "test_db_rollback_cap").
 -define(OFF_DIR, "test_db_rollback_off").
+-define(ORD_DIR, "test_db_rollback_ordered").
+-define(ORD_SYS_DIR, "test_db_rollback_ordered_sys").
 
 %%--------------------------------------------------------------------
 %% Mnesia
@@ -44,6 +47,23 @@ disabled_test_() ->
     {setup, fun() -> setup(mnesia, ?OFF_DIR, 0) end,
      fun(_) -> teardown(mnesia, ?OFF_DIR) end,
      fun disabled_writes_nothing/0}.
+
+%%--------------------------------------------------------------------
+%% ordered-by user
+%%--------------------------------------------------------------------
+ordered_mnesia_test_() ->
+    {foreach, fun() -> setup_ordered(mnesia, ?ORD_DIR) end,
+     fun(_) -> teardown(mnesia, ?ORD_DIR) end,
+     [fun rollback_file_stores_user_order/0,
+      fun rollback_show_preserves_user_order/0,
+      fun restore_previous_restores_user_order/0,
+      fun rollback_file_stores_leaf_list_order/0]}.
+
+ordered_sys_config_test_() ->
+    {foreach, fun() -> setup_ordered(sys_config, ?ORD_SYS_DIR) end,
+     fun(_) -> teardown(sys_config, ?ORD_SYS_DIR) end,
+     [fun rollback_show_preserves_user_order/0,
+      fun restore_previous_restores_user_order/0]}.
 
 %%--------------------------------------------------------------------
 %% Cases
@@ -131,6 +151,53 @@ disabled_writes_nothing() ->
     ?assertEqual({error, {rollback_disabled, 1}},
                  mgmtd:txn_rollback(mgmtd:txn_new(), 1)).
 
+rollback_file_stores_user_order() ->
+    commit_rules([{"z", "drop"}, {"a", "permit"}, {"m", "drop"}]),
+    ?assertEqual([{"z"}, {"a"}, {"m"}], rule_keys()),
+    {ok, #{rows := Rows}} = consult_rollback(0),
+    List = lists:keyfind(["ord", "acl", "rule"], #cfg.path, Rows),
+    ?assertMatch(#cfg{node_type = list, value = {ordered, [{"z"}, {"a"}, {"m"}]}},
+                 List).
+
+rollback_show_preserves_user_order() ->
+    commit_rules([{"z", "drop"}, {"a", "permit"}, {"m", "drop"}]),
+    {ok, Tree0} = mgmtd:rollback_show(0),
+    {ok, Running} = mgmtd:txn_show(undefined, []),
+    ?assertEqual(Running, Tree0),
+    ?assertEqual([{"z"}, {"a"}, {"m"}], rule_keys_from_tree(Tree0)),
+    move_rule_first({"a"}),
+    ?assertEqual([{"a"}, {"z"}, {"m"}], rule_keys()),
+    {ok, Prev} = mgmtd:rollback_show(1),
+    {ok, Now} = mgmtd:rollback_show(0),
+    ?assertEqual([{"z"}, {"a"}, {"m"}], rule_keys_from_tree(Prev)),
+    ?assertEqual([{"a"}, {"z"}, {"m"}], rule_keys_from_tree(Now)).
+
+restore_previous_restores_user_order() ->
+    commit_rules([{"z", "drop"}, {"a", "permit"}, {"m", "drop"}]),
+    move_rule_first({"a"}),
+    ?assertEqual([{"a"}, {"z"}, {"m"}], rule_keys()),
+    Txn = mgmtd:txn_new(),
+    {ok, Txn2} = mgmtd:txn_rollback(Txn, 1),
+    ?assertEqual([{"z"}, {"a"}, {"m"}],
+                 mgmtd:list_keys(Txn2, ["ord", "acl", "rule"], '$1')),
+    {ok, _} = mgmtd:txn_commit(Txn2),
+    ?assertEqual([{"z"}, {"a"}, {"m"}], rule_keys()).
+
+rollback_file_stores_leaf_list_order() ->
+    {ok, Tags} = mgmtd_schema:lookup_path(["ord", "acl", "tag", ["c", "a", "b"]]),
+    {ok, _} = mgmtd:txn_commit(element(2, mgmtd:txn_set(mgmtd:txn_new(), Tags))),
+    ?assertEqual({ok, ["c", "a", "b"]}, mgmtd:lookup(["ord", "acl", "tag"])),
+    {ok, #{rows := Rows}} = consult_rollback(0),
+    LL = lists:keyfind(["ord", "acl", "tag"], #cfg.path, Rows),
+    ?assertMatch(#cfg{node_type = leaf_list, value = ["c", "a", "b"]}, LL),
+    {ok, Move} = mgmtd:txn_move(mgmtd:txn_new(),
+                                ["ord", "acl", "tag", {"a"}], first),
+    {ok, _} = mgmtd:txn_commit(Move),
+    ?assertEqual({ok, ["a", "c", "b"]}, mgmtd:lookup(["ord", "acl", "tag"])),
+    {ok, Txn} = mgmtd:txn_rollback(mgmtd:txn_new(), 1),
+    {ok, _} = mgmtd:txn_commit(Txn),
+    ?assertEqual({ok, ["c", "a", "b"]}, mgmtd:lookup(["ord", "acl", "tag"])).
+
 %%--------------------------------------------------------------------
 %% Helpers
 %%--------------------------------------------------------------------
@@ -141,6 +208,49 @@ setup(Backend, Dir, Count) ->
     ok = mgmtd:load_function_schema(fun mgmtd_test_schema:cfg_schema/0),
     ok = mgmtd_cfg_db:init(Dir, [{backend, Backend}, {rollback, Count}]),
     ok.
+
+setup_ordered(Backend, Dir) ->
+    start_mgmtd(),
+    lists:foreach(fun mgmtd:remove_schema/1, mgmtd:registered_schemas()),
+    ok = mgmtd_cfg_db:remove_db(Dir, [{backend, Backend}]),
+    ok = mgmtd:load_yang_module("test/yang/example-ordered.yang"),
+    ok = mgmtd_cfg_db:init(Dir, [{backend, Backend}, {rollback, 10}]),
+    ok.
+
+commit_rules(Terms) ->
+    Txn = lists:foldl(
+            fun({Name, Action}, Acc) ->
+                    {ok, SP} = mgmtd_schema:lookup_path(
+                                 ["ord", "acl", "rule", {Name}, "action", Action]),
+                    {ok, Acc1} = mgmtd:txn_set(Acc, SP),
+                    Acc1
+            end, mgmtd:txn_new(), Terms),
+    {ok, _} = mgmtd:txn_commit(Txn).
+
+move_rule_first(Key) ->
+    {ok, SP} = mgmtd_schema:lookup_path(["ord", "acl", "rule", Key]),
+    {ok, Txn} = mgmtd:txn_move(mgmtd:txn_new(), SP, first),
+    {ok, _} = mgmtd:txn_commit(Txn).
+
+rule_keys() ->
+    [K || K <- mgmtd_cfg_db:list_keys(["ord", "acl", "rule"]), is_tuple(K)].
+
+rule_keys_from_tree(Tree) ->
+    Ord = proplists:get_value("ord", Tree),
+    Acl = proplists:get_value("acl", Ord),
+    Rules = proplists:get_value("rule", Acl),
+    [K || {K, _} <- Rules].
+
+consult_rollback(N) ->
+    File = rb_file(N),
+    {ok, [{mgmtd_rollback, 1, _Meta, Maps}]} = file:consult(File),
+    {ok, #{rows => [map_to_cfg(M) || M <- Maps]}}.
+
+map_to_cfg(#{path := Path, node_type := Type} = M) ->
+    #cfg{path = Path,
+         name = maps:get(name, M, lists:last(Path)),
+         node_type = Type,
+         value = maps:get(value, M, undefined)}.
 
 teardown(Backend, Dir) ->
     lists:foreach(fun({{_Path, _Pid, Ref}, _}) ->

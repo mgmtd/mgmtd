@@ -24,8 +24,8 @@
 
 -export_type([txn/0]).
 
--export([new/0, exit_txn/1, get/2, get_tree/2, get_tree/3, set/3, delete/2, list_keys/3,
-         match_object/2, commit/1, rollback/2, will_change/1,
+-export([new/0, exit_txn/1, get/2, get_stored/2, get_tree/2, get_tree/3, set/3, delete/2,
+         move/3, list_keys/3, match_object/2, commit/1, rollback/2, will_change/1,
          tree/1, baseline_tree/1]).
 
 new() ->
@@ -114,7 +114,14 @@ commit_ops(#cfg_txn{} = Txn, Ops) ->
                   lists:foreach(fun({set, Path, Value}) ->
                                         mgmtd_cfg_db:insert_path_items(permanent, Path, Value);
                                    ({delete, Path}) ->
-                                        mgmtd_cfg_db:delete_path_items(permanent, Path)
+                                        mgmtd_cfg_db:delete_path_items(permanent, Path);
+                                   ({move, Path, Where}) ->
+                                        case mgmtd_cfg_db:move_item(permanent, Path, Where) of
+                                            {ok, _} ->
+                                                ok;
+                                            {error, Reason} ->
+                                                throw({error, Reason})
+                                        end
                                 end, lists:reverse(Ops))
           end,
     case mgmtd_cfg_db:transaction(Fun) of
@@ -139,6 +146,25 @@ get(#cfg_txn{ets_copy = Copy}, Path) ->
         [] ->
             mgmtd_schema:get_default(Path)
     end.
+
+%% Stored value only — no schema default. `undefined` txn reads committed DB.
+-spec get_stored(txn() | undefined, item_path()) -> {ok, term()} | none.
+get_stored(#cfg_txn{ets_copy = Copy}, Path) ->
+    case ets:lookup(Copy, Path) of
+        [#cfg{value = Value}] ->
+            {ok, Value};
+        [] ->
+            none
+    end;
+get_stored(undefined, Path) ->
+    case mgmtd_cfg_db:lookup(Path) of
+        [#cfg{value = Value}] ->
+            {ok, Value};
+        _ ->
+            none
+    end;
+get_stored(_, _) ->
+    none.
 
 %% Operational mode (no config txn) reads committed config from the
 %% backend. There is no named ETS table `cfg` — that was leftover from
@@ -193,7 +219,7 @@ get_tree_from(Db, Path) ->
     %% ?DBG("Tree ~p~n",[Tree]),
     SimpleTree = mgmtd_cfg_db:simplify_tree(Tree),
     %% ?DBG("Simple Tree ~p~n",[SimpleTree]),
-    SimpleTree.
+    order_shown_list(Db, Key, SimpleTree).
 
 %% We don't need the whole tree from the root if the user only requested part of the tree
 %% so just drop nodes higher up the tree
@@ -249,7 +275,7 @@ walk_child(Txn, Parent, #{name := Name, node_type := list}) ->
                       [] -> false;
                       Kids -> {true, {Key, Kids}}
                   end
-          end, lists:sort(Keys)),
+          end, Keys),
     case Items of
         [] -> omit;
         _ -> {Name, Items}
@@ -307,6 +333,20 @@ list_keys_at(undefined, Path) ->
             []
     end.
 
+%% Showing a list (not its parent) drops the list node, so zipper
+%% sibling order is path order. Re-apply stored user order.
+order_shown_list(Db, Path, Tree) ->
+    case mgmtd_schema:lookup(Path) of
+        #{node_type := list} ->
+            Keys = [K || K <- mgmtd_cfg_db:list_keys(Db, Path, '$1'), is_tuple(K)],
+            Map = maps:from_list([{K, V} || {K, V} <- Tree]),
+            Ordered = [{K, maps:get(K, Map)} || K <- Keys, maps:is_key(K, Map)],
+            Extra = [P || {K, _} = P <- Tree, not lists:member(K, Keys)],
+            Ordered ++ Extra;
+        _ ->
+            Tree
+    end.
+
 drop_path_prefix(Path, [#cfg{path = FullPath, node_type = Leaf} = Cfg]) when Leaf == leaf; Leaf == leaf_list ->
     %% For a single leaf keep one parent - the name of the leaf itself
     PathLen = length(Path) - 1,
@@ -345,6 +385,27 @@ set(#cfg_txn{ets_copy = Copy, ops = Ops} = Txn, Path, Value) ->
 delete(#cfg_txn{ets_copy = Copy, ops = Ops} = Txn, Path) ->
     mgmtd_cfg_db:delete_path_items({ets, Copy}, Path),
     {ok, Txn#cfg_txn{ops = [{delete, Path} | Ops]}}.
+
+%% @doc Reorder an existing `ordered-by user` list entry or leaf-list
+%% value. `Path` is a schema path (from `lookup_path/1`) or an item
+%% path. `Where` is `first` | `last` | `{before, Point}` | `{'after', Point}`
+%% where `Point` is a list key tuple or a leaf-list value.
+-spec move(#cfg_txn{}, map_path() | item_path(),
+           first | last | {before, term()} | {'after', term()}) ->
+          {ok, #cfg_txn{}} | {error, term()}.
+move(#cfg_txn{ets_copy = Copy, ops = Ops} = Txn, Path, Where) ->
+    ItemPath = move_item_path(Path),
+    case mgmtd_cfg_db:move_item({ets, Copy}, ItemPath, Where) of
+        {ok, _} ->
+            {ok, Txn#cfg_txn{ops = [{move, ItemPath, Where} | Ops]}};
+        {error, _} = Err ->
+            Err
+    end.
+
+move_item_path([#{role := schema} | _] = Path) ->
+    mgmtd_cfg_db:schema_path_to_key(Path);
+move_item_path(Path) when is_list(Path) ->
+    Path.
 
 list_keys(undefined, Path, Pattern) ->
     mgmtd_cfg_db:list_keys(Path, Pattern);

@@ -39,11 +39,7 @@
 %%% API
 %%%===================================================================
 
-%%--------------------------------------------------------------------
-%% @doc
-%% Starts the server
-%% @end
-%%--------------------------------------------------------------------
+%% @doc Starts the server.
 -spec start_link() -> {ok, Pid :: pid()} |
           {error, Error :: {already_started, pid()}} |
           {error, Error :: term()} |
@@ -87,12 +83,8 @@ etag() ->
 %%% gen_server callbacks
 %%%===================================================================
 
-%%--------------------------------------------------------------------
-%% @private
-%% @doc
-%% Initializes the server
-%% @end
-%%--------------------------------------------------------------------
+%% @doc Initializes the server.
+%% -doc hidden. https://github.com/erlang/otp/issues/9672
 -spec init(Args :: term()) -> {ok, State :: #state{}} |
           {ok, State :: term(), Timeout :: timeout()} |
           {ok, State :: term(), hibernate} |
@@ -102,12 +94,8 @@ init([]) ->
     process_flag(trap_exit, true),
     {ok, #state{}}.
 
-%%--------------------------------------------------------------------
-%% @private
-%% @doc
-%% Handling call messages
-%% @end
-%%--------------------------------------------------------------------
+%% @doc Handling call messages.
+%% -doc hidden. https://github.com/erlang/otp/issues/9672
 -spec handle_call(Request :: term(), From :: {pid(), term()}, State :: #state{}) ->
           {reply, Reply :: term(), NewState :: #state{}} |
           {reply, Reply :: term(), NewState :: #state{}, Timeout :: timeout()} |
@@ -188,12 +176,8 @@ handle_call(_Request, _From, State) ->
     Reply = ok,
     {reply, Reply, State}.
 
-%%--------------------------------------------------------------------
-%% @private
-%% @doc
-%% Handling cast messages
-%% @end
-%%--------------------------------------------------------------------
+%% @doc Handling cast messages.
+%% -doc hidden. https://github.com/erlang/otp/issues/9672
 -spec handle_cast(Request :: term(), State :: #state{}) ->
           {noreply, NewState :: #state{}} |
           {noreply, NewState :: #state{}, Timeout :: timeout()} |
@@ -202,12 +186,8 @@ handle_call(_Request, _From, State) ->
 handle_cast(_Request, State) ->
     {noreply, State}.
 
-%%--------------------------------------------------------------------
-%% @private
-%% @doc
-%% Handling all non call/cast messages
-%% @end
-%%--------------------------------------------------------------------
+%% @doc Handling all non call/cast messages.
+%% -doc hidden. https://github.com/erlang/otp/issues/9672
 -spec handle_info(Info :: timeout() | term(), State :: #state{}) ->
           {noreply, NewState :: #state{}} |
           {noreply, NewState :: #state{}, Timeout :: timeout()} |
@@ -234,26 +214,15 @@ handle_info({'DOWN', _, _, Pid, _}, State) ->
 handle_info(_Info, State) ->
     {noreply, State}.
 
-%%--------------------------------------------------------------------
-%% @private
-%% @doc
-%% This function is called by a gen_server when it is about to
-%% terminate. It should be the opposite of Module:init/1 and do any
-%% necessary cleaning up. When it returns, the gen_server terminates
-%% with Reason. The return value is ignored.
-%% @end
-%%--------------------------------------------------------------------
+%% @doc Called by gen_server just before terminate. Opposite of init/1.
+%% -doc hidden. https://github.com/erlang/otp/issues/9672
 -spec terminate(Reason :: normal | shutdown | {shutdown, term()} | term(),
                 State :: #state{}) -> any().
 terminate(_Reason, _State) ->
     ok.
 
-%%--------------------------------------------------------------------
-%% @private
-%% @doc
-%% Convert process state when code is changed
-%% @end
-%%--------------------------------------------------------------------
+%% @doc Convert process state when code is changed.
+%% -doc hidden. https://github.com/erlang/otp/issues/9672
 -spec code_change(OldVsn :: term() | {down, term()},
                   State :: #state{},
                   Extra :: term()) -> {ok, NewState :: term()} |

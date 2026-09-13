@@ -9,7 +9,7 @@
 -compile({no_auto_import, [put/2]}).
 
 -export([get/2, resource/2,
-         put/2, post/2, patch/2, delete/1,
+         put/2, put/3, post/2, post/3, patch/2, delete/1,
          http/3,
          etag_value/0, check_etag/1]).
 
@@ -39,20 +39,31 @@ http(Method, Path, Req) ->
         {error, Err} ->
             mgmtd_restconf_error:reply(Req, status(Err), Err);
         ok ->
-            case read_json_body(Req) of
-                {error, Err, Req1} ->
-                    mgmtd_restconf_error:reply(Req1, status(Err), Err);
-                {ok, Body, Req1} ->
-                    Result = case Method of
-                                 <<"PUT">> -> put(Path, Body);
-                                 <<"POST">> -> post(Path, Body);
-                                 <<"PATCH">> -> patch(Path, Body);
-                                 _ ->
-                                     {error, #{tag => <<"operation-not-supported">>,
-                                               http => 405,
-                                               message => <<"method not allowed">>}}
-                             end,
-                    reply_result(Req1, Result, Method)
+            case {Method, insert_opts(Req)} of
+                {_, {error, Err}} ->
+                    mgmtd_restconf_error:reply(Req, status(Err), Err);
+                {<<"PATCH">>, Insert} when Insert =/= undefined ->
+                    mgmtd_restconf_error:reply(
+                      Req, 400,
+                      #{tag => <<"invalid-value">>,
+                        http => 400,
+                        message => <<"insert is only valid on PUT and POST">>});
+                {Method1, Insert} ->
+                    case read_json_body(Req) of
+                        {error, Err, Req1} ->
+                            mgmtd_restconf_error:reply(Req1, status(Err), Err);
+                        {ok, Body, Req1} ->
+                            Result = case Method1 of
+                                         <<"PUT">> -> put(Path, Body, Insert);
+                                         <<"POST">> -> post(Path, Body, Insert);
+                                         <<"PATCH">> -> patch(Path, Body);
+                                         _ ->
+                                             {error, #{tag => <<"operation-not-supported">>,
+                                                       http => 405,
+                                                       message => <<"method not allowed">>}}
+                                     end,
+                            reply_result(Req1, Result, Method1)
+                    end
             end
     end.
 
@@ -63,7 +74,7 @@ get_or_head(Path, Req, Kind) ->
         Opts ->
             case resource(Path, Opts) of
                 {ok, Map} ->
-                    Body = iolist_to_binary(json:encode(Map)),
+                    Body = iolist_to_binary(mgmtd_json:encode(Map)),
                     Headers = #{<<"content-type">> => ?JSON,
                                 <<"etag">> => etag_value(),
                                 <<"content-length">> =>
@@ -94,19 +105,29 @@ resource(Path, Opts) when is_map(Opts) ->
 -spec put(binary() | string(), map()) ->
           {ok, created | replaced} | {error, map()}.
 put(Path, Body) ->
+    put(Path, Body, undefined).
+
+-spec put(binary() | string(), map(), undefined | map()) ->
+          {ok, created | replaced} | {error, map()}.
+put(Path, Body, Insert) ->
     with_parsed_config(Path, fun(Parsed) ->
-        case mgmtd_restconf_json:decode(Parsed, Body, put) of
+        case insert_where(Parsed, Insert) of
             {error, Err} ->
                 {error, Err};
-            {ok, Ops, _Created} ->
-                Existed = mgmtd_restconf_json:exists(Parsed),
-                case run_txn(Ops) of
-                    ok when Existed ->
-                        {ok, replaced};
-                    ok ->
-                        {ok, created};
-                    {error, _} = Err ->
-                        Err
+            {ok, Where} ->
+                case mgmtd_restconf_json:decode(Parsed, Body, put) of
+                    {error, Err} ->
+                        {error, Err};
+                    {ok, Ops, _Created} ->
+                        Existed = mgmtd_restconf_json:exists(Parsed),
+                        case run_txn(append_move(Ops, Parsed, Where)) of
+                            ok when Existed ->
+                                {ok, replaced};
+                            ok ->
+                                {ok, created};
+                            {error, _} = Err ->
+                                Err
+                        end
                 end
         end
     end).
@@ -114,22 +135,32 @@ put(Path, Body) ->
 -spec post(binary() | string(), map()) ->
           {ok, binary()} | {error, map()}.
 post(Path, Body) ->
+    post(Path, Body, undefined).
+
+-spec post(binary() | string(), map(), undefined | map()) ->
+          {ok, binary()} | {error, map()}.
+post(Path, Body, Insert) ->
     with_parsed_config(Path, fun(Parsed) ->
-        case mgmtd_restconf_json:decode(Parsed, Body, post) of
+        case insert_where(Parsed, Insert) of
             {error, Err} ->
                 {error, Err};
-            {ok, Ops, Created} ->
-                case mgmtd_restconf_json:exists(Created) of
-                    true ->
-                        {error, #{tag => <<"data-exists">>,
-                                  http => 409,
-                                  message => <<"data resource already exists">>}};
-                    false ->
-                        case run_txn(Ops) of
-                            ok ->
-                                {ok, mgmtd_restconf_path:data_uri(Created)};
-                            {error, _} = Err ->
-                                Err
+            {ok, Where} ->
+                case mgmtd_restconf_json:decode(Parsed, Body, post) of
+                    {error, Err} ->
+                        {error, Err};
+                    {ok, Ops, Created} ->
+                        case mgmtd_restconf_json:exists(Created) of
+                            true ->
+                                {error, #{tag => <<"data-exists">>,
+                                          http => 409,
+                                          message => <<"data resource already exists">>}};
+                            false ->
+                                case run_txn(append_move(Ops, Created, Where)) of
+                                    ok ->
+                                        {ok, mgmtd_restconf_path:data_uri(Created)};
+                                    {error, _} = Err ->
+                                        Err
+                                end
                         end
                 end
         end
@@ -238,6 +269,15 @@ apply_ops(Txn, [{set, Path, Value} | Rest]) ->
             {error, #{tag => <<"invalid-value">>,
                       http => 400,
                       message => fmt(Reason)}}
+    end;
+apply_ops(Txn, [{move, Path, Where} | Rest]) ->
+    case mgmtd:txn_move(Txn, Path, Where) of
+        {ok, Txn1} ->
+            apply_ops(Txn1, Rest);
+        {error, Reason} ->
+            {error, #{tag => <<"invalid-value">>,
+                      http => 400,
+                      message => fmt(Reason)}}
     end.
 
 read_json_body(Req) ->
@@ -251,7 +291,7 @@ read_json_body(Req) ->
                               http => 400,
                               message => <<"empty request body">>}, Req1};
                 {ok, Bin, Req1} ->
-                    try json:decode(Bin) of
+                    try mgmtd_json:decode(Bin) of
                         Map when is_map(Map) ->
                             {ok, Map, Req1};
                         _ ->
@@ -315,6 +355,138 @@ query_opts(Req) ->
         {Content, Defaults} ->
             #{content => Content, defaults => Defaults}
     end.
+
+%% RFC 8040 §4.8.5 / §4.8.6. `undefined` means no insert query param.
+insert_opts(Req) ->
+    Qs = cowboy_req:parse_qs(Req),
+    case lists:keyfind(<<"insert">>, 1, Qs) of
+        false ->
+            undefined;
+        {_, <<"first">>} ->
+            #{insert => first};
+        {_, <<"last">>} ->
+            #{insert => last};
+        {_, <<"before">>} ->
+            insert_with_point(before, Qs);
+        {_, <<"after">>} ->
+            insert_with_point('after', Qs);
+        {_, Other} ->
+            {error, #{tag => <<"invalid-value">>,
+                      http => 400,
+                      message => <<"invalid insert parameter: ", Other/binary>>}}
+    end.
+
+insert_with_point(Side, Qs) ->
+    case lists:keyfind(<<"point">>, 1, Qs) of
+        false ->
+            {error, #{tag => <<"invalid-value">>,
+                      http => 400,
+                      message => <<"point is required for insert=before|after">>}};
+        {_, Point} ->
+            #{insert => Side, point => Point}
+    end.
+
+insert_where(_Parsed, undefined) ->
+    {ok, undefined};
+insert_where(#{schema := Schema, item_path := Path}, #{insert := Insert} = Opts) ->
+    Type = maps:get(node_type, Schema, undefined),
+    case {Type, mgmtd_schema:ordered_by(Schema)} of
+        {list, user} ->
+            insert_where1(Insert, maps:get(point, Opts, undefined), Path, list);
+        {leaf_list, user} ->
+            insert_where1(Insert, maps:get(point, Opts, undefined), Path, leaf_list);
+        {Type1, system} when Type1 =:= list; Type1 =:= leaf_list ->
+            {error, #{tag => <<"invalid-value">>,
+                      http => 400,
+                      message => <<"insert is only valid for ordered-by user lists">>}};
+        _ ->
+            {error, #{tag => <<"invalid-value">>,
+                      http => 400,
+                      message => <<"insert is only valid for ordered-by user lists">>}}
+    end.
+
+insert_where1(first, _Point, _Path, _Kind) ->
+    {ok, first};
+insert_where1(last, _Point, _Path, _Kind) ->
+    {ok, last};
+insert_where1(Side, undefined, _Path, _Kind) when Side =:= before; Side =:= 'after' ->
+    {error, #{tag => <<"invalid-value">>,
+              http => 400,
+              message => <<"point is required for insert=before|after">>}};
+insert_where1(Side, Point, Path, Kind) when Side =:= before; Side =:= 'after' ->
+    case parse_point(Point) of
+        {error, Err} ->
+            {error, Err};
+        {ok, PointPath} ->
+            case same_collection(Path, PointPath, Kind) of
+                {ok, PointKey} ->
+                    {ok, {Side, PointKey}};
+                {error, _} = Err ->
+                    Err
+            end
+    end;
+insert_where1(_Insert, _Point, _Path, _Kind) ->
+    {error, #{tag => <<"invalid-value">>,
+              http => 400,
+              message => <<"invalid insert parameter">>}}.
+
+parse_point(Bin) when is_binary(Bin) ->
+    case mgmtd_restconf_path:parse(point_data_path(Bin)) of
+        {ok, #{item_path := ItemPath}} ->
+            {ok, ItemPath};
+        {ok, _} ->
+            {error, #{tag => <<"invalid-value">>,
+                      http => 400,
+                      message => <<"point is not a data resource">>}};
+        {error, Err} ->
+            {error, Err}
+    end;
+parse_point(_) ->
+    {error, #{tag => <<"invalid-value">>,
+              http => 400,
+              message => <<"invalid point parameter">>}}.
+
+point_data_path(Bin) ->
+    case binary:match(Bin, <<"/restconf/data">>) of
+        {Pos, _} ->
+            binary:part(Bin, Pos, byte_size(Bin) - Pos);
+        nomatch ->
+            case Bin of
+                <<"/", _/binary>> -> Bin;
+                _ -> <<"/restconf/data/", Bin/binary>>
+            end
+    end.
+
+same_collection(Path, PointPath, Kind) ->
+    {Coll, _} = split_keyed(Path),
+    case split_keyed(PointPath) of
+        {Coll, PointKey} when PointKey =/= undefined ->
+            {ok, point_key(Kind, PointKey)};
+        _ ->
+            {error, #{tag => <<"invalid-value">>,
+                      http => 400,
+                      message => <<"point is not in the same list">>}}
+    end.
+
+split_keyed(Path) ->
+    case lists:last(Path) of
+        Key when is_tuple(Key) ->
+            {lists:droplast(Path), Key};
+        _ ->
+            {Path, undefined}
+    end.
+
+point_key(list, Key) ->
+    Key;
+point_key(leaf_list, {Val}) ->
+    Val;
+point_key(leaf_list, Val) ->
+    Val.
+
+append_move(Ops, _Parsed, undefined) ->
+    Ops;
+append_move(Ops, #{item_path := Path}, Where) ->
+    Ops ++ [{move, Path, Where}].
 
 content_qs(Qs) ->
     case lists:keyfind(<<"content">>, 1, Qs) of

@@ -81,13 +81,20 @@ node_json(Prefix, PrefixMod, ParentMod, ParentPath, Schema) ->
     Node6 = put_opt(Node5, <<"max_elements">>,
                   max_el(maps:get(max_elements, Schema, unlimited))),
     Node7 = put_opt(Node6, <<"pattern">>, maps:get(pattern, Schema, undefined)),
+    Node8 = case Kind of
+                list -> Node7#{<<"ordered_by">> =>
+                                   atom_to_binary(maps:get(ordered_by, Schema, system), utf8)};
+                leaf_list -> Node7#{<<"ordered_by">> =>
+                                        atom_to_binary(maps:get(ordered_by, Schema, system), utf8)};
+                _ -> Node7
+            end,
     case Kind of
-        leaf -> Node7;
-        leaf_list -> Node7;
+        leaf -> Node8;
+        leaf_list -> Node8;
         _ ->
             Kids = [node_json(Prefix, PrefixMod, ThisMod, Path, C)
                     || C <- restconf_children(Prefix, Path)],
-            Node7#{<<"children">> => Kids}
+            Node8#{<<"children">> => Kids}
     end.
 
 restconf_children(Prefix, Path) ->

@@ -216,8 +216,35 @@ json_list_sets_has_list_on_ancestors_test() ->
             mgmtd_schema:lookup(["jsontest", "pool", "servers"]),
         ?assert(lists:member("jsontest",
                              [maps:get(name, C)
-                              || C <- mgmtd:schema_children([], delete)]))
+                              || C <- mgmtd:schema_children([], delete)])),
+        ?assertNot(lists:member("jsontest",
+                                [maps:get(name, C)
+                                 || C <- mgmtd:schema_children([], move)]))
     after
         file:delete(File),
         mgmtd:remove_schema(jsontest)
     end.
+
+user_ordered_list_marks_ancestors_test() ->
+    mgmtd_sup:start_link(),
+    lists:foreach(fun mgmtd:remove_schema/1, mgmtd:registered_schemas()),
+    ok = mgmtd:load_yang_module("test/yang/example-ordered.yang"),
+    #{has_user_ordered_list := true, ordered_by := user, node_type := list} =
+        mgmtd_schema:lookup(["ord", "acl", "rule"]),
+    #{has_user_ordered_list := true} = mgmtd_schema:lookup(["ord", "acl"]),
+    #{has_user_ordered_list := true} = mgmtd_schema:lookup(["ord"]),
+    #{has_user_ordered_list := false, ordered_by := system} =
+        mgmtd_schema:lookup(["ord", "sys", "item"]),
+    #{has_user_ordered_list := false} = mgmtd_schema:lookup(["ord", "sys"]),
+    MoveRoot = [maps:get(name, C) || C <- mgmtd:schema_children([], move)],
+    ?assertEqual(["ord"], MoveRoot),
+    MoveAcl = [maps:get(name, C) || C <- mgmtd:schema_children(["ord", "acl"], move)],
+    ?assertEqual(["rule"], MoveAcl),
+    MoveSys = [maps:get(name, C) || C <- mgmtd:schema_children(["ord", "sys"], move)],
+    ?assertEqual([], MoveSys),
+    ok = mgmtd:load_function_schema(fun mgmtd_test_schema:cfg_schema/0),
+    MoveWithDefault = [maps:get(name, C) || C <- mgmtd:schema_children([], move)],
+    ?assert(lists:member("ord", MoveWithDefault)),
+    ?assertNot(lists:member("server", MoveWithDefault)),
+    ok = mgmtd:remove_schema(ord),
+    ok = mgmtd:remove_schema().

@@ -13,12 +13,12 @@ init(Req0, State) ->
     {ok, Req, State}.
 
 handle(<<"GET">>, Req) ->
-    Body = iolist_to_binary(json:encode(mgmtd_ui_schema:snapshot())),
+    Body = iolist_to_binary(mgmtd_json:encode(mgmtd_ui_schema:snapshot())),
     cowboy_req:reply(200, #{<<"content-type">> => ?JSON,
                             <<"content-length">> => integer_to_binary(byte_size(Body))},
                      Body, Req);
 handle(<<"HEAD">>, Req) ->
-    Body = iolist_to_binary(json:encode(mgmtd_ui_schema:snapshot())),
+    Body = iolist_to_binary(mgmtd_json:encode(mgmtd_ui_schema:snapshot())),
     cowboy_req:reply(200, #{<<"content-type">> => ?JSON,
                             <<"content-length">> => integer_to_binary(byte_size(Body))},
                      <<>>, Req);

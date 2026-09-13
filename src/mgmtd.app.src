@@ -7,7 +7,7 @@
    [kernel,
     stdlib,
     xmerl,
-    json_polyfill,
+    jsx,
     cowboy,
     erlydtl
    ]},

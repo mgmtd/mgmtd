@@ -22,7 +22,7 @@
 -type item_path() :: [path_node()].
 -type schema_path() :: [string() | '_'].
 -type node_type() :: container | leaf | list | leaf_list | list_key.
--type cmd_type() :: show | set | delete.
+-type cmd_type() :: show | set | delete | move.
 -type schema_source() :: json | function | yang | unknown.
 -type schema_info() :: #{prefix := prefix(),
                          module := string(),
@@ -49,9 +49,11 @@
          data_callback :: atom(),
          min_elements = 0 :: integer(),
          max_elements = unlimited :: unlimited | integer(),
+         ordered_by = system :: system | user,
          pattern :: undefined | string(),
          mandatory = false :: boolean(),
          has_list = false :: boolean(),
+         has_user_ordered_list = false :: boolean(),
          config = false :: boolean(),
          opts = [] :: list()}).
 
@@ -68,12 +70,14 @@
                       key_internal_values => [term()],
                       min_elements => integer(),
                       max_elements => unlimited | integer(),
+                      ordered_by => system | user,
                       pattern => string(),
                       mandatory => boolean(),
                       config => boolean(),
                       data_callback => atom(),
                       cmd_type => cmd_type(),
                       has_list => boolean(),
+                      has_user_ordered_list => boolean(),
                       opts => list(),
                       origin_module => string() | undefined,
                       children => function() }.

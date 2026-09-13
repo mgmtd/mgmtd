@@ -255,7 +255,7 @@ loc_href(Base, Path, Mode) ->
 
 path_qs(<<>>) -> [];
 path_qs(Path) ->
-    Quoted = iolist_to_binary(uri_string:quote(to_bin(Path))),
+    Quoted = uri_quote(to_bin(Path)),
     [<<"path=", Quoted/binary>>].
 
 mode_qs(oper) -> [<<"mode=oper">>];
@@ -913,8 +913,22 @@ child_path(Parent, Name) ->
     <<P/binary, $/, Name/binary>>.
 
 keyed_path(ListPath, Keys) ->
-    Enc = lists:join($,, [uri_string:quote(to_bin(K)) || K <- Keys]),
+    Enc = lists:join($,, [uri_quote(to_bin(K)) || K <- Keys]),
     iolist_to_binary([strip_slash(ListPath), $=, Enc]).
+
+%% uri_string:quote/1 is OTP 25+. RFC 3986 unreserved: ALPHA / DIGIT / "-" / "." / "_" / "~".
+uri_quote(Bin) when is_binary(Bin) ->
+    << <<(uri_quote_byte(C))/binary>> || <<C>> <= Bin >>.
+
+uri_quote_byte(C) when C >= $a, C =< $z -> <<C>>;
+uri_quote_byte(C) when C >= $A, C =< $Z -> <<C>>;
+uri_quote_byte(C) when C >= $0, C =< $9 -> <<C>>;
+uri_quote_byte(C) when C =:= $-; C =:= $.; C =:= $_; C =:= $~ -> <<C>>;
+uri_quote_byte(C) ->
+    <<$%, (hex_digit(C bsr 4)), (hex_digit(C band 15))>>.
+
+hex_digit(N) when N < 10 -> $0 + N;
+hex_digit(N) -> $A + (N - 10).
 
 strip_slash(P) ->
     S = byte_size(P),
@@ -978,7 +992,7 @@ draft_from_value(B) when is_binary(B) -> B;
 draft_from_value(L) when is_list(L) ->
     case io_lib:printable_unicode_list(L) of
         true -> unicode:characters_to_binary(L);
-        false -> iolist_to_binary(json:encode(L))
+        false -> iolist_to_binary(mgmtd_json:encode(L))
     end;
 draft_from_value(Other) ->
     iolist_to_binary(io_lib:format("~p", [Other])).
@@ -994,7 +1008,7 @@ format_scalar(B) when is_binary(B) -> B;
 format_scalar(L) when is_list(L) ->
     case io_lib:printable_unicode_list(L) of
         true -> unicode:characters_to_binary(L);
-        false -> iolist_to_binary(json:encode(L))
+        false -> iolist_to_binary(mgmtd_json:encode(L))
     end;
 format_scalar(Other) ->
     iolist_to_binary(io_lib:format("~p", [Other])).

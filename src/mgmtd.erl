@@ -15,7 +15,8 @@
          registered_schemas/0,
          load_config_db/1]).
 %% Transaction API
--export([txn_new/0, txn_exit/1, txn_set/2, txn_delete/2, txn_show/2, txn_show/3, txn_commit/1,
+-export([txn_new/0, txn_exit/1, txn_set/2, txn_delete/2, txn_move/3,
+         txn_show/2, txn_show/3, txn_commit/1,
          txn_diff/1, txn_diff/2, txn_diff/3, txn_diff_text/1, txn_diff_text/2, txn_diff_text/3,
          format_diff/1,
          rollback_list/0, rollback_show/1, txn_rollback/2, rollback/1]).
@@ -24,7 +25,7 @@
 
 -export([lookup/1, lookup/2]).
 %% Data Callback API towards included configuration database
--export([list_keys/3]).
+-export([list_keys/3, get_value/2]).
 
 -include("../include/mgmtd.hrl").
 -include("mgmtd_schema.hrl").
@@ -147,6 +148,12 @@ txn_delete(Txn, SchemaPath) ->
     %% io:format(user, "Deleting path ~p in Txn ~p~n", [pp_path(SchemaPath), Txn]),
     mgmtd_cfg_txn:delete(Txn, SchemaPath).
 
+%% @doc Move an existing `ordered-by user` list entry or leaf-list value.
+%% `Where` is `first` | `last` | `{before, Point}` | `{'after', Point}`.
+%% New items created with `txn_set/2` are appended (RFC 7950 default).
+txn_move(Txn, SchemaPath, Where) ->
+    mgmtd_cfg_txn:move(Txn, SchemaPath, Where).
+
 txn_show(Txn, SchemaPath) ->
     txn_show(Txn, SchemaPath, #{}).
 
@@ -255,6 +262,18 @@ list_keys(Txn, ListItemPath, ListKeyMatch) ->
                 {error, _} ->
                     []
             end
+    end.
+
+%% @doc Stored value at `Path` in the session txn (or committed DB when
+%% `Txn` is `undefined`). Does not fill schema defaults. Used by ecli
+%% tab-completion to show `[existing]` after a leaf name.
+-spec get_value(term(), item_path()) -> {ok, term()} | not_found.
+get_value(Txn, Path) ->
+    case mgmtd_cfg_txn:get_stored(Txn, Path) of
+        {ok, Value} ->
+            {ok, Value};
+        none ->
+            not_found
     end.
 
 %% @doc Subscribe to configuration change messages.

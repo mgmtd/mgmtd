@@ -1,0 +1,30 @@
+module example-ordered {
+  namespace "urn:example:ordered";
+  prefix ord;
+
+  container acl {
+    list rule {
+      key "name";
+      ordered-by user;
+      leaf name {
+        type string;
+      }
+      leaf action {
+        type string;
+      }
+    }
+    leaf-list tag {
+      type string;
+      ordered-by user;
+    }
+  }
+
+  container sys {
+    list item {
+      key "name";
+      leaf name {
+        type string;
+      }
+    }
+  }
+}

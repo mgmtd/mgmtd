@@ -47,7 +47,8 @@ list_item_test_() ->
       fun create_list_item_keys_only_invalid_keys/0,
       fun show_committed_without_txn/0,
       fun show_defaults_fills_schema_defaults/0,
-      fun delete_then_readd_same_key_in_one_txn/0
+      fun delete_then_readd_same_key_in_one_txn/0,
+      fun get_value_skips_defaults_until_set/0
      ]}.
 
 create_and_delete_list_item() ->
@@ -263,6 +264,21 @@ delete_then_readd_same_key_in_one_txn() ->
     ?assertEqual({ok, [Key]}, mgmtd:lookup(["server", "servers"])),
     ?assertEqual({ok, 9999}, mgmtd:lookup(Item ++ ["port"])),
     ?assertEqual({ok, "127.0.0.1"}, mgmtd:lookup(Item ++ ["host"])).
+
+%% CLI tab-completion uses get_value/2, which must return the stored
+%% value and not a schema default for an unset leaf.
+get_value_skips_defaults_until_set() ->
+    Key = {"cli-get-value"},
+    Item = ["server", "servers", Key],
+    Port = Item ++ ["port"],
+    Txn = mgmtd:txn_new(),
+    {ok, Txn2} = txn_set(Txn, Item),
+    ?assertEqual(not_found, mgmtd:get_value(Txn2, Port)),
+    {ok, Txn3} = txn_set(Txn2, Port ++ ["81"]),
+    ?assertEqual({ok, 81}, mgmtd:get_value(Txn3, Port)),
+    {ok, Txn4} = mgmtd:txn_commit(Txn3),
+    ?assertEqual({ok, 81}, mgmtd:get_value(undefined, Port)),
+    {ok, _} = txn_delete_commit(Txn4, Item).
 
 txn_set(Txn, Path) ->
     {ok, SchemaPath} = mgmtd_schema:lookup_path(Path),

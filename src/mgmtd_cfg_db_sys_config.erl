@@ -102,7 +102,11 @@ transaction(Fun) when is_function(Fun, 0) ->
         _Other ->
             restore(Tab, Snapshot),
             {error, "FAIL"}
-    catch Class:Reason:Stack ->
+    catch
+        throw:{error, Reason} ->
+            restore(Tab, Snapshot),
+            {error, Reason};
+        Class:Reason:Stack ->
             restore(Tab, Snapshot),
             erlang:raise(Class, Reason, Stack)
     end.
@@ -301,7 +305,11 @@ export_nodes(_) ->
 export_node(#cfg{node_type = container, name = Name, path = Path, value = Children}) ->
     {to_key(Name), maybe_codec_export(Path, export_nodes(Children))};
 export_node(#cfg{node_type = list, name = Name, path = Path, value = Items}) when is_list(Items) ->
-    Default = [export_list_item(I) || I <- lists:keysort(#cfg.name, Items)],
+    Sorted = case mgmtd_schema:ordered_by(Path) of
+                 user -> Items;
+                 system -> lists:keysort(#cfg.name, Items)
+             end,
+    Default = [export_list_item(I) || I <- Sorted],
     {to_key(Name), maybe_codec_export(Path, Default)};
 export_node(#cfg{node_type = list, name = Name, path = Path, value = _}) ->
     {to_key(Name), maybe_codec_export(Path, [])};

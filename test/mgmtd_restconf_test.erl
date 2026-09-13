@@ -82,7 +82,7 @@ api_root_is_yang_json() ->
     ?assertEqual(200, Code),
     ?assertEqual("application/yang-data+json",
                  proplists:get_value("content-type", Headers)),
-    #{<<"ietf-restconf:restconf">> := Root} = json:decode(Body),
+    #{<<"ietf-restconf:restconf">> := Root} = mgmtd_json:decode(Body),
     ?assertMatch(#{<<"data">> := #{},
                    <<"operations">> := #{},
                    <<"yang-library-version">> := <<"2016-06-21">>},
@@ -92,12 +92,12 @@ yang_library_version() ->
     {Code, _, Body} = http_get("/restconf/yang-library-version"),
     ?assertEqual(200, Code),
     ?assertEqual(#{<<"ietf-restconf:yang-library-version">> => <<"2016-06-21">>},
-                 json:decode(Body)).
+                 mgmtd_json:decode(Body)).
 
 modules_state_includes_builtins() ->
     {Code, _, Body} = http_get("/restconf/data/ietf-yang-library:modules-state"),
     ?assertEqual(200, Code),
-    #{<<"ietf-yang-library:modules-state">> := State} = json:decode(Body),
+    #{<<"ietf-yang-library:modules-state">> := State} = mgmtd_json:decode(Body),
     true = is_map(State),
     #{<<"module-set-id">> := Id, <<"module">> := Mods} = State,
     true = is_list(Mods),
@@ -109,21 +109,21 @@ modules_state_includes_builtins() ->
 operations_is_empty() ->
     {Code, _, Body} = http_get("/restconf/operations"),
     ?assertEqual(200, Code),
-    ?assertEqual(#{<<"ietf-restconf:operations">> => #{}}, json:decode(Body)).
+    ?assertEqual(#{<<"ietf-restconf:operations">> => #{}}, mgmtd_json:decode(Body)).
 
 data_root_has_yang_library() ->
     {Code, Headers, Body} = http_get("/restconf/data"),
     ?assertEqual(200, Code),
     ?assertEqual("application/yang-data+json",
                  proplists:get_value("content-type", Headers)),
-    #{<<"ietf-yang-library:modules-state">> := State} = json:decode(Body),
+    #{<<"ietf-yang-library:modules-state">> := State} = mgmtd_json:decode(Body),
     ?assert(is_map(State)).
 
 xml_accept_is_not_acceptable() ->
     {Code, _, Body} =
         http_get("/restconf", [{"Accept", "application/yang-data+xml"}]),
     ?assertEqual(406, Code),
-    #{<<"ietf-restconf:errors">> := #{<<"error">> := [Err]}} = json:decode(Body),
+    #{<<"ietf-restconf:errors">> := #{<<"error">> := [Err]}} = mgmtd_json:decode(Body),
     true = is_map(Err),
     ?assertEqual(<<"operation-not-supported">>, maps:get(<<"error-tag">>, Err)).
 

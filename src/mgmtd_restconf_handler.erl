@@ -87,7 +87,7 @@ host_meta(Req) ->
 json_get(Req, Fun) ->
     case negotiate(Req) of
         json ->
-            Body = iolist_to_binary(json:encode(Fun())),
+            Body = iolist_to_binary(mgmtd_json:encode(Fun())),
             cowboy_req:reply(200, json_headers(Body), Body, Req);
         xml ->
             mgmtd_restconf_error:reply(
@@ -99,7 +99,7 @@ json_get(Req, Fun) ->
 json_head(Req, Fun) ->
     case negotiate(Req) of
         json ->
-            Body = iolist_to_binary(json:encode(Fun())),
+            Body = iolist_to_binary(mgmtd_json:encode(Fun())),
             cowboy_req:reply(200, json_headers(Body), <<>>, Req);
         xml ->
             mgmtd_restconf_error:reply(

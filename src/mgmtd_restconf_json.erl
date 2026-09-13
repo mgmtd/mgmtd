@@ -177,7 +177,7 @@ encode_list_body(Path, Schema, Module, Ctx) ->
                   omit -> false;
                   Map -> {true, Map}
               end
-      end, lists:sort(Keys)).
+      end, Keys).
 
 encode_list_item(Path, _Schema, Module, Ctx) ->
     Children = mgmtd_schema:children(Path, show),
@@ -527,16 +527,21 @@ decode_patch_instance(#{item_path := InstPath, module := Module} = Parsed,
     {lists:reverse(Ops), Parsed}.
 
 decode_post_leaf_list(Path, Schema, _Module, Val, Parsed) ->
-    case is_list(Val) of
-        true ->
-            Internals = from_json_list(maps:get(type, Schema), Val),
-            Existing = read_leaf_list(Path, Schema),
-            {[{set, Path, Existing ++ Internals}], Parsed};
-        false ->
-            Internal = from_json(maps:get(type, Schema), Val),
-            Existing = read_leaf_list(Path, Schema),
-            {[{set, Path, Existing ++ [Internal]}], Parsed}
-    end.
+    Internal = case is_list(Val) of
+                   true ->
+                       case from_json_list(maps:get(type, Schema), Val) of
+                           [One] ->
+                               One;
+                           _ ->
+                               err(400, <<"malformed-message">>,
+                                   <<"POST must create exactly one leaf-list entry">>)
+                       end;
+                   false ->
+                       from_json(maps:get(type, Schema), Val)
+               end,
+    Existing = read_leaf_list(Path, Schema),
+    Created = Parsed#{item_path => Path ++ [{Internal}]},
+    {[{set, Path, Existing ++ [Internal]}], Created}.
 
 decode_post_container(Path, _Schema, Module, Inner, Parsed) when is_map(Inner) ->
     case maps:size(Inner) of

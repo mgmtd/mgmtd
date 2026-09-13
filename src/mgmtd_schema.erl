@@ -15,19 +15,19 @@
          unregister_schema/1, registered_schemas/0, loaded_schema_infos/0,
          namespace_uri/1, restconf_module_name/2]).
 -export([register_identities/1, identities/0, identity_derived_from/2]).
--export([prefix_container/2, mark_has_list_descendent/2]).
+-export([prefix_container/2, mark_has_list_descendent/2,
+         mark_has_user_ordered_list_descendent/2]).
 -export([lookup/1, lookup/2, get_default/1, get_default/2]).
 -export([lookup_path/1]).
 -export([children/1, children/2, children/3]).
 -export([split_item_path/1, cli_path/2]).
 -export([cast_value/2, cast_list_key_values/1, cast/2]).
--export([codec/1, data_callback/1, resolve_data_callback/3]).
+-export([codec/1, data_callback/1, resolve_data_callback/3, ordered_by/1]).
 -export([ets_pat/1, ets_tail/1]).
 
 -include("../include/mgmtd.hrl").
 -include("mgmtd_schema.hrl").
 
-%% @doc
 %% Ideally we want to have the same internal representation of JSON schema
 %% and Yang - a superset of the capabilities of both
 %% with the same concepts in each dealt with by the same code
@@ -65,7 +65,6 @@
 %% In Yang each subtree can be independentally configured to hold
 %% either config or operational data. For JSON Schema this attribute
 %% needs to be provided at load time.
-%%
 -spec load_json_schema_file(FilePath :: file:filename()) ->
           ok | {error, Reason :: term()}.
 load_json_schema_file(File) ->
@@ -316,15 +315,27 @@ children(Path, CmdType) ->
 
 -spec children(ns(), item_path(), cmd_type()) -> list().
 children(Ns, Path, delete) ->
-    SchemaPath = item_path_to_schema_path(cli_path(Ns, Path)),
-    Recs = ets:match_object(mgmtd_commands, #schema{path = {SchemaPath ++ ['_'], Ns}, has_list = true, _ = ets_pat('_')}),
-    ?DBG("Found children in schema db at path ~p~n~p~n", [SchemaPath, Recs]),
-    maybe_add_prefixes(Ns, Path, delete,
-                       lists:map(fun(R) -> schema_to_map(R, delete) end, Recs));
+    flagged_children(Ns, Path, delete, has_list);
+children(Ns, Path, move) ->
+    flagged_children(Ns, Path, move, has_user_ordered_list);
 children(Ns, Path, CmdType) ->
     SchemaPath = item_path_to_schema_path(cli_path(Ns, Path)),
     ?DBG("Finding children in schema db at path ~p~n", [SchemaPath]),
     Recs = ets:match_object(mgmtd_commands, #schema{path = {SchemaPath ++ ['_'], Ns}, _ = ets_pat('_')}),
+    maybe_add_prefixes(Ns, Path, CmdType,
+                       lists:map(fun(R) -> schema_to_map(R, CmdType) end, Recs)).
+
+flagged_children(Ns, Path, CmdType, Flag) ->
+    SchemaPath = item_path_to_schema_path(cli_path(Ns, Path)),
+    Pat = #schema{path = {SchemaPath ++ ['_'], Ns}, _ = ets_pat('_')},
+    Pattern = case Flag of
+                  has_list ->
+                      Pat#schema{has_list = true};
+                  has_user_ordered_list ->
+                      Pat#schema{has_user_ordered_list = true}
+              end,
+    Recs = ets:match_object(mgmtd_commands, Pattern),
+    ?DBG("Found children in schema db at path ~p~n~p~n", [SchemaPath, Recs]),
     maybe_add_prefixes(Ns, Path, CmdType,
                        lists:map(fun(R) -> schema_to_map(R, CmdType) end, Recs)).
 
@@ -390,7 +401,9 @@ schema_infos() ->
     end.
 
 maybe_add_prefixes(?DEFAULT_NS, [], delete, Maps) ->
-    Maps ++ prefix_child_maps(delete, fun(#schema{has_list = HasList}) -> HasList end);
+    Maps ++ prefix_child_maps(delete, fun(#schema{has_list = true}) -> true; (_) -> false end);
+maybe_add_prefixes(?DEFAULT_NS, [], move, Maps) ->
+    Maps ++ prefix_child_maps(move, fun(#schema{has_user_ordered_list = true}) -> true; (_) -> false end);
 maybe_add_prefixes(?DEFAULT_NS, [], CmdType, Maps) ->
     Maps ++ prefix_child_maps(CmdType, fun(_) -> true end);
 maybe_add_prefixes(_Ns, _Path, _CmdType, Maps) ->
@@ -428,6 +441,16 @@ mark_has_list_descendent(Ns, Path) ->
     [Node] = ets:lookup(mgmtd_commands, {SchPath, Ns}),
     ets:insert(mgmtd_commands, Node#schema{has_list = true}),
     mark_has_list_descendent(Ns, tl(Path)).
+
+%% Path is the reverse parent path (not including the user-ordered list).
+-spec mark_has_user_ordered_list_descendent(prefix(), [string()]) -> ok.
+mark_has_user_ordered_list_descendent(_Ns, []) ->
+    ok;
+mark_has_user_ordered_list_descendent(Ns, Path) ->
+    SchPath = lists:reverse(Path),
+    [Node] = ets:lookup(mgmtd_commands, {SchPath, Ns}),
+    ets:insert(mgmtd_commands, Node#schema{has_user_ordered_list = true}),
+    mark_has_user_ordered_list_descendent(Ns, tl(Path)).
 
 identity_from_opts(Opts) ->
     PrefixOpt = maps:get(prefix, Opts, undefined),
@@ -564,12 +587,14 @@ schema_to_map(#schema{path = {Path, Ns}} = S, CmdType) ->
       key_values => [],
       min_elements => S#schema.min_elements,
       max_elements => S#schema.max_elements,
+      ordered_by => S#schema.ordered_by,
       pattern => S#schema.pattern,
       mandatory => S#schema.mandatory,
       config => S#schema.config,
       data_callback => S#schema.data_callback,
       cmd_type => CmdType,
       has_list => S#schema.has_list,
+      has_user_ordered_list => S#schema.has_user_ordered_list,
       opts => S#schema.opts,
       origin_module => proplists:get_value(origin_module, S#schema.opts, undefined),
       children => fun(ChildPath) -> children(ChildPath, CmdType) end }.
@@ -605,6 +630,26 @@ resolve_data_callback(undefined, Parent, Config) ->
     resolve_data_callback(Parent, undefined, Config);
 resolve_data_callback(NodeCb, _Parent, _Config) ->
     NodeCb.
+
+%% @doc `ordered-by` for a list or leaf-list. Default `system`.
+-spec ordered_by(item_path() | map_node() | #schema{}) -> system | user.
+ordered_by(#{ordered_by := user}) ->
+    user;
+ordered_by(#{ordered_by := system}) ->
+    system;
+ordered_by(#schema{ordered_by = user}) ->
+    user;
+ordered_by(#schema{ordered_by = system}) ->
+    system;
+ordered_by(Path) when is_list(Path) ->
+    case lookup(Path) of
+        #{} = Map ->
+            ordered_by(Map);
+        _ ->
+            system
+    end;
+ordered_by(_) ->
+    system.
 
 %% @doc Persistence codec module named in schema `opts` as `{codec, Mod}`.
 %% Used by the sys.config backend as a term adapter at that node.

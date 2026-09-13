@@ -189,7 +189,7 @@ http_post_location() ->
         httpc:request(get, {GetUrl, []}, [{timeout, 2000}],
                       [{body_format, binary}]),
     true = is_binary(GetBody),
-    ?assertEqual(#{<<"default:port">> => 7}, json:decode(GetBody)).
+    ?assertEqual(#{<<"default:port">> => 7}, mgmtd_json:decode(GetBody)).
 
 header(Name, Headers) ->
     case lists:keyfind(Name, 1, Headers) of
@@ -199,7 +199,7 @@ header(Name, Headers) ->
     end.
 
 jsx_or_json(Map) ->
-    iolist_to_binary(json:encode(Map)).
+    iolist_to_binary(mgmtd_json:encode(Map)).
 
 json_file() ->
     "test/json_schema_restconf_write.json".

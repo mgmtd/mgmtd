@@ -179,18 +179,18 @@ with_defaults_explicit() ->
 http_get_default_leaf() ->
     {Code, _, Body} = http_get("/restconf/data/default:server/servers=web/port"),
     ?assertEqual(200, Code),
-    ?assertEqual(#{<<"default:port">> => 81}, json:decode(Body)).
+    ?assertEqual(#{<<"default:port">> => 81}, mgmtd_json:decode(Body)).
 
 http_get_json_schema() ->
     {Code, _, Body} = http_get("/restconf/data/js:app/title"),
     ?assertEqual(200, Code),
-    ?assertEqual(#{<<"js:title">> => <<"demo">>}, json:decode(Body)).
+    ?assertEqual(#{<<"js:title">> => <<"demo">>}, mgmtd_json:decode(Body)).
 
 http_get_yang() ->
     {Code, _, Body} =
         http_get("/restconf/data/example-server:server/servers=yang1/port"),
     ?assertEqual(200, Code),
-    ?assertEqual(#{<<"example-server:port">> => 83}, json:decode(Body)).
+    ?assertEqual(#{<<"example-server:port">> => 83}, mgmtd_json:decode(Body)).
 
 http_get(Path) ->
     Url = lists:flatten(

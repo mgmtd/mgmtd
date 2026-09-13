@@ -62,6 +62,8 @@ transaction(Fun) ->
     case mnesia:transaction(Fun) of
         {atomic, ok} ->
             ok;
+        {aborted, {error, Reason}} ->
+            {error, Reason};
         Err ->
             ?DBG("Transaction errro ~p",[Err]),
             io:format(user, "Transaction errro ~p",[Err]),

@@ -77,12 +77,15 @@ load_node(#list{name = Name, desc = Desc, key_names = KeyNames, config = Config0
                 desc = Desc,
                 min_elements = Node#list.min_elements,
                 max_elements = Node#list.max_elements,
+                ordered_by = Node#list.ordered_by,
                 has_list = true,
+                has_user_ordered_list = Node#list.ordered_by =:= user,
                 config = Config,
                 opts = Node#list.opts},
                                                 % io:format(user, "L - ~p~n", [lists:reverse(Path)]),
     true = ets:insert_new(mgmtd_commands, LeafList),
     ok = mgmtd_schema:mark_has_list_descendent(Ns, Path),
+    ok = maybe_mark_user_ordered(Node#list.ordered_by, Ns, Path),
     load(Node#list.children, [Name | Path], Ns, Config, Callback);
 load_node(#leaf{name = Name, desc = Desc, type = Type, default = Default, config = Config0} = Node, Path, Ns, IsConfig, ParentCb) ->
     Config = inherited_config(Config0, IsConfig),
@@ -116,6 +119,7 @@ load_node(#leaf_list{name = Name, desc = Desc, type = Type, config = Config0} = 
                 data_callback = Callback,
                 min_elements = Node#leaf_list.min_elements,
                 max_elements = Node#leaf_list.max_elements,
+                ordered_by = Node#leaf_list.ordered_by,
                 mandatory = Node#leaf_list.mandatory,
                 config = Config,
                 opts = Node#leaf_list.opts},
@@ -190,11 +194,14 @@ load_node_resolved(#list{name = Name, desc = Desc, key_names = KeyNames, config 
                 desc = Desc,
                 min_elements = Node#list.min_elements,
                 max_elements = Node#list.max_elements,
+                ordered_by = Node#list.ordered_by,
                 has_list = true,
+                has_user_ordered_list = Node#list.ordered_by =:= user,
                 config = Config,
                 opts = origin_opts(Node#list.opts, Origin)},
     true = ets:insert_new(mgmtd_commands, List),
     ok = mgmtd_schema:mark_has_list_descendent(Ns, Path),
+    ok = maybe_mark_user_ordered(Node#list.ordered_by, Ns, Path),
     load_resolved_children(Node#list.children, [Name | Path], Ns, Callback, Origin);
 load_node_resolved(#leaf{name = Name, desc = Desc, type = Type, default = Default, config = Config} = Node, Path, Ns, ParentCb, Origin) ->
     Callback = mgmtd_schema:resolve_data_callback(Node#leaf.data_callback, ParentCb, Config),
@@ -227,6 +234,7 @@ load_node_resolved(#leaf_list{name = Name, desc = Desc, type = Type, config = Co
                 data_callback = Callback,
                 min_elements = Node#leaf_list.min_elements,
                 max_elements = Node#leaf_list.max_elements,
+                ordered_by = Node#leaf_list.ordered_by,
                 mandatory = Node#leaf_list.mandatory,
                 config = Config,
                 opts = origin_opts(Node#leaf_list.opts, Origin)},
@@ -265,3 +273,8 @@ node_name(#container{name = Name}) -> Name.
 %% record default (false).
 inherited_config(NodeConfig, ParentConfig) ->
     ParentConfig orelse NodeConfig.
+
+maybe_mark_user_ordered(user, Ns, Path) ->
+    mgmtd_schema:mark_has_user_ordered_list_descendent(Ns, Path);
+maybe_mark_user_ordered(_, _Ns, _Path) ->
+    ok.

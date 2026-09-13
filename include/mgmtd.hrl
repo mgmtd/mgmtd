@@ -68,6 +68,7 @@
         key_names = [] :: [string()],
         min_elements = 0 :: integer(),
         max_elements = unlimited :: unlimited | integer(),
+        ordered_by = system :: system | user,
         data_callback :: atom(),
         unique = true :: boolean(),
         config = false :: boolean(),
@@ -98,6 +99,7 @@
         data_callback :: atom(),
         min_elements = 0 :: integer(),
         max_elements = unlimited :: unlimited | integer(),
+        ordered_by = system :: system | user,
         undefined :: undefined | boolean(),
         opts = [] :: list()
     }).
