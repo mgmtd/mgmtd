@@ -626,13 +626,6 @@ codec(Path) when is_list(Path) ->
 codec(_) ->
     undefined.
 
-%% @doc Validate Item against the schema stored at Path.
-%% The item must be a value of a leaf or leaf-list
-%%
--spec validate(Path :: schema_path(), Item :: term()) -> ok | {error, Reason :: term()}.
-validate(Path, Item) ->
-    ok.
-
 cast_value(Path, Value) ->
     try case lists:last(Path) of
             #{node_type := leaf, type := Type} = Last ->

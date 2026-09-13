@@ -121,14 +121,17 @@ lookup_missing_leaf() ->
 
 lookup_container() ->
     {ok, Names} = mgmtd:lookup(["status"]),
+    true = is_list(Names),
     ?assertEqual(["interfaces", "peers", "tags", "uptime"], lists:sort(Names)).
 
 lookup_list_keys() ->
     {ok, Keys} = mgmtd:lookup(["status", "interfaces"]),
+    true = is_list(Keys),
     ?assertEqual([{"eth0"}, {"eth1"}], lists:sort(Keys)).
 
 lookup_list_item_children() ->
     {ok, Names} = mgmtd:lookup(["status", "interfaces", {"eth0"}]),
+    true = is_list(Names),
     ?assertEqual(["mtu", "name", "state"], lists:sort(Names)).
 
 lookup_key_leaf_from_path() ->

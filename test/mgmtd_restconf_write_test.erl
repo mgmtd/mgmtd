@@ -188,6 +188,7 @@ http_post_location() ->
     {ok, {{_, 200, _}, _, GetBody}} =
         httpc:request(get, {GetUrl, []}, [{timeout, 2000}],
                       [{body_format, binary}]),
+    true = is_binary(GetBody),
     ?assertEqual(#{<<"default:port">> => 7}, json:decode(GetBody)).
 
 header(Name, Headers) ->

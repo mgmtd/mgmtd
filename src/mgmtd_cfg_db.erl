@@ -31,7 +31,7 @@
 %% --------------------------------------------------------------------
 -spec init(file:filename(), proplists:proplist()) -> ok | {error, term()}.
 init(DbLocation, Opts) ->
-    Backend = proplists:get_value(backend, Opts, json),
+    Backend = proplists:get_value(backend, Opts, mnesia),
     BackendMod = backend_mod(Backend),
     case BackendMod:init(DbLocation, Opts) of
         ok ->
@@ -43,7 +43,7 @@ init(DbLocation, Opts) ->
     end.
 
 remove_db(DbLocation, Opts) ->
-    Backend = proplists:get_value(backend, Opts, json),
+    Backend = proplists:get_value(backend, Opts, mnesia),
     BackendMod = backend_mod(Backend),
     ok = BackendMod:remove_db(DbLocation, Opts),
     try ets:delete(mgmtd_meta, db_location) catch error:badarg -> true end,
@@ -113,9 +113,15 @@ match_object(Pattern) ->
 -spec match_object(permanent | {ets, ets:table()}, term()) -> [#cfg{}].
 match_object(permanent, Pattern) ->
     BackendMod = backend(),
-    BackendMod:match_object(Pattern);
+    cfg_rows(BackendMod:match_object(Pattern));
 match_object({ets, Ets}, Pattern) ->
-    ets:match_object(Ets, Pattern).
+    cfg_rows(ets:match_object(Ets, ets_pattern(Pattern))).
+
+-spec ets_pattern(eqwalizer:dynamic()) -> ets:match_pattern().
+ets_pattern(Pattern) -> Pattern.
+
+-spec cfg_rows(eqwalizer:dynamic()) -> [#cfg{}].
+cfg_rows(Rows) -> Rows.
 
 list_keys(Path) ->
     list_keys(Path, '$1').
@@ -177,8 +183,6 @@ backend() ->
     end.
 
 backend_mod(mnesia) -> mgmtd_cfg_db_mnesia;
-backend_mod(json)   -> mgmtd_cfg_db_json;
-backend_mod(config) -> mgmtd_cfg_db_config;
 backend_mod(sys_config) -> mgmtd_cfg_db_sys_config.
 
 to_ok(true) -> ok;

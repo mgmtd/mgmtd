@@ -13,15 +13,20 @@
 -include("mgmtd_schema.hrl").
 
 -type content() :: all | config | nonconfig.
+-type data_ref() :: #{module := string(),
+                      prefix := atom(),
+                      item_path := item_path(),
+                      schema := map()}.
+-type parse_ok() :: datastore | yanglib_state | yanglib_id | data_ref().
 
--export_type([content/0]).
+-export_type([content/0, data_ref/0, parse_ok/0]).
 
 %% {ok, datastore} |
 %% {ok, yanglib_state} |
 %% {ok, yanglib_id} |
 %% {ok, #{module, prefix, item_path, schema}} |
 %% {error, #{tag, message}}
--spec parse(binary() | string()) -> {ok, term()} | {error, map()}.
+-spec parse(binary() | string()) -> {ok, parse_ok()} | {error, map()}.
 parse(Path) when is_list(Path) ->
     parse(list_to_binary(Path));
 parse(<<"/restconf/data">>) ->

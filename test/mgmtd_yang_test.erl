@@ -433,11 +433,13 @@ compile_leafref_and_unique_test() ->
 compile_enum_values_test() ->
     {ok, #{nodes := Nodes}} =
         mgmtd_schema_yang:compile_file("test/yang/example-xpath-funs.yang"),
-    #leaf{type = {enum, Members}} =
+    #leaf{type = Type} =
         lists:keyfind("speed", #leaf.name, Nodes),
+    {enum, Members} = Type,
+    true = is_list(Members),
     ?assertEqual([#{name => "slow", value => 1},
                   #{name => "fast", value => 2}],
-                 [maps:with([name, value], M) || M <- Members]).
+                 [maps:with([name, value], M) || M <- Members, is_map(M)]).
 
 union_and_bits_cast_test() ->
     start_mgmtd(),

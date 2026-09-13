@@ -98,9 +98,11 @@ modules_state_includes_builtins() ->
     {Code, _, Body} = http_get("/restconf/data/ietf-yang-library:modules-state"),
     ?assertEqual(200, Code),
     #{<<"ietf-yang-library:modules-state">> := State} = json:decode(Body),
+    true = is_map(State),
     #{<<"module-set-id">> := Id, <<"module">> := Mods} = State,
+    true = is_list(Mods),
     ?assert(is_binary(Id) andalso byte_size(Id) > 0),
-    Names = [maps:get(<<"name">>, M) || M <- Mods],
+    Names = [maps:get(<<"name">>, M) || M <- Mods, is_map(M)],
     ?assert(lists:member(<<"ietf-yang-library">>, Names)),
     ?assert(lists:member(<<"ietf-restconf">>, Names)).
 
@@ -122,6 +124,7 @@ xml_accept_is_not_acceptable() ->
         http_get("/restconf", [{"Accept", "application/yang-data+xml"}]),
     ?assertEqual(406, Code),
     #{<<"ietf-restconf:errors">> := #{<<"error">> := [Err]}} = json:decode(Body),
+    true = is_map(Err),
     ?assertEqual(<<"operation-not-supported">>, maps:get(<<"error-tag">>, Err)).
 
 unknown_path_is_not_found() ->

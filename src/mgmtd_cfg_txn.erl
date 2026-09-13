@@ -321,7 +321,7 @@ drop_path_prefix(Path, Rows) ->
                     (_) -> true
                  end, New).
 
--spec set(#cfg_txn{}, map_path(), term()) -> {ok, #cfg_txn{}} | {error, string()}.
+-spec set(#cfg_txn{}, map_path(), term()) -> {ok, #cfg_txn{}} | {error, term()}.
 set(#cfg_txn{ets_copy = Copy, ops = Ops} = Txn, Path, Value) ->
     case mgmtd_schema:cast_value(Path, Value) of
         {ok, InternalValue} ->

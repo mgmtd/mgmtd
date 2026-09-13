@@ -254,7 +254,9 @@ loc_href(Base, Path, Mode) ->
     end.
 
 path_qs(<<>>) -> [];
-path_qs(Path) -> [<<"path=", (uri_string:quote(Path))/binary>>].
+path_qs(Path) ->
+    Quoted = iolist_to_binary(uri_string:quote(to_bin(Path))),
+    [<<"path=", Quoted/binary>>].
 
 mode_qs(oper) -> [<<"mode=oper">>];
 mode_qs(config) -> [].
@@ -1082,7 +1084,8 @@ compile_files([], _Dir, _Opts) ->
     ok;
 compile_files([F | Rest], Dir, Opts) ->
     File = filename:join(Dir, F),
-    Mod = list_to_atom(filename:basename(F, ".dtl") ++ "_dtl"),
+    Base = binary_to_list(iolist_to_binary(filename:basename(F, ".dtl"))),
+    Mod = list_to_atom(Base ++ "_dtl"),
     case erlydtl:compile_file(File, Mod, Opts) of
         {ok, _} -> compile_files(Rest, Dir, Opts);
         {ok, _, _} -> compile_files(Rest, Dir, Opts);

@@ -79,7 +79,7 @@
     {
         name :: string(),
         type :: data_type(),
-        desc :: string(),
+        desc = "" :: string(),
         default,
         mandatory = false :: boolean(),
         config = false :: boolean(),
@@ -91,7 +91,7 @@
     {
         name :: string(),
         type :: data_type(),
-        desc :: string(),
+        desc = "" :: string(),
         default,
         mandatory = false :: boolean(),
         config = false :: boolean(),

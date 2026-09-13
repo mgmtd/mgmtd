@@ -371,13 +371,21 @@ encode_value(_Type, B) when is_boolean(B) ->
     B;
 encode_value(_Type, T) when is_tuple(T), tuple_size(T) =:= 4;
                             is_tuple(T), tuple_size(T) =:= 8 ->
-    list_to_binary(inet:ntoa(T));
+    list_to_binary(ip_string(T));
 encode_value(_Type, S) when is_list(S) ->
     unicode:characters_to_binary(S);
 encode_value(_Type, B) when is_binary(B) ->
     B;
 encode_value(_Type, A) when is_atom(A) ->
     atom_to_binary(A, utf8).
+
+ip_string(T) ->
+    case inet:ntoa(T) of
+        {error, einval} ->
+            lists:flatten(io_lib:format("~p", [T]));
+        Str ->
+            Str
+    end.
 
 not_found() ->
     #{tag => <<"invalid-value">>,
@@ -620,7 +628,7 @@ key_token(_Type, Val) when is_integer(Val) ->
     integer_to_list(Val);
 key_token(_Type, Val) when is_tuple(Val), tuple_size(Val) =:= 4;
                            is_tuple(Val), tuple_size(Val) =:= 8 ->
-    inet:ntoa(Val);
+    ip_string(Val);
 key_token(_Type, Val) when is_binary(Val) ->
     binary_to_list(Val);
 key_token(_Type, Val) when is_atom(Val) ->

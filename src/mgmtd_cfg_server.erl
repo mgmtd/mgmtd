@@ -153,7 +153,8 @@ handle_call(new_txn, _From, State) ->
 handle_call({exit_txn, Txn}, _From, State) ->
     mgmtd_cfg_txn:exit_txn(Txn),
     {reply, ok, State};
-handle_call({commit, Txn}, _From, State) ->
+handle_call({commit, Txn0}, _From, State) ->
+    Txn = txn(Txn0),
     %% Generate all subscription messages
     Subscriptions = [K || {K,[]} <- ets:tab2list(State#state.subs)],
     %% io:format(user, "with subscriptions ~p~n", [Subscriptions]),
@@ -285,6 +286,10 @@ initial_subscription_ops(Path) ->
         ok ->
             {ok, subscription_ops(Path, empty, committed)}
     end.
+
+%% gen_server messages are untyped; the public API only passes txns.
+-spec txn(eqwalizer:dynamic()) -> mgmtd_cfg_txn:txn().
+txn(Txn) -> Txn.
 
 %% Subscription messages on transaction commit
 subscription_messages(Subscriptions, Txn) ->

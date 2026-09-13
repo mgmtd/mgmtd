@@ -35,14 +35,17 @@ import_unpacks_tagged_tuples() ->
     [{NameA, NA}, {NameB, NB}] =
         [{proplists:get_value(name, P), proplists:get_value(n, P)}
          || P <- mgmtd_test_codec:import([{item, a, #{n => 1}},
-                                          {item, b, #{n => 2}}])],
+                                          {item, b, #{n => 2}}]),
+            is_list(P)],
     ?assertEqual({"a", 1}, {NameA, NA}),
     ?assertEqual({"b", 2}, {NameB, NB}).
 
 roundtrip_default_form() ->
     Default = [[{name, "a"}, {n, 1}]],
     Back = mgmtd_test_codec:import(mgmtd_test_codec:export(Default)),
-    ?assertEqual(lists:sort(hd(Default)), lists:sort(hd(Back))).
+    Item = hd(Back),
+    true = is_list(Item),
+    ?assertEqual(lists:sort(hd(Default)), lists:sort(Item)).
 
 import_rejects_unknown_tag() ->
     ?assertThrow({import_error, {unsupported_item, {other, x}}},
@@ -131,6 +134,7 @@ assert_lookups() ->
     ?assertEqual({ok, "b"}, mgmtd:lookup(["items", {"b"}, "name"])),
     ?assertEqual({ok, 2}, mgmtd:lookup(["items", {"b"}, "n"])),
     {ok, Keys} = mgmtd:lookup(["items"]),
+    true = is_list(Keys),
     ?assertEqual([{"a"}, {"b"}], lists:sort(Keys)).
 
 write_wire_file() ->

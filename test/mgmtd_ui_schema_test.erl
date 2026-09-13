@@ -100,6 +100,7 @@ http_get_schema() ->
     CT = proplists:get_value("content-type", Headers),
     ?assert(is_list(CT) andalso string:prefix(CT, "application/json") =/= nomatch),
     #{<<"modules">> := [Default]} = json:decode(Body),
+    true = is_map(Default),
     ?assertEqual(<<"default">>, maps:get(<<"name">>, Default)),
     lists:foreach(fun mgmtd:remove_schema/1, mgmtd:registered_schemas()).
 

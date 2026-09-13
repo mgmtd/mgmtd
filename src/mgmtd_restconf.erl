@@ -51,7 +51,10 @@ stop() ->
 
 -spec port() -> inet:port_number().
 port() ->
-    ranch:get_port(?LISTENER).
+    case ranch:get_port(?LISTENER) of
+        Port when is_integer(Port) ->
+            Port
+    end.
 
 start_listener() ->
     {ok, _} = application:ensure_all_started(cowboy),

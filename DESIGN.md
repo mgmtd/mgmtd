@@ -94,7 +94,7 @@ Prefix is the operational identity:
 
 - ETS schema key `{LocalPath, Prefix}`
 - CLI path token for named prefixes (`set example server ...`)
-- Future `sys.config` application-name slot (`{example, [...]}`)
+- `sys.config` application-name slot (`{example, [...]}`)
 - `mgmtd:remove_schema/1` / `mgmtd:registered_schemas/0`
 
 The default prefix (`default`) is silent: CLI, schema paths, and
@@ -103,7 +103,7 @@ root container; schema, CLI, and config-DB paths all start with it:
 
     ["example", "server", "servers", {"foo"}, "port"]
 
-`sys.config` export will wrap default rows as `{default, Tree}` so they
+`sys.config` export wraps default rows as `{default, Tree}` so they
 are not dumped as fake OTP apps. Named prefixes already match
 `{Prefix, Tree}` as the children of that root container.
 
@@ -205,12 +205,12 @@ the schema loader
 Database backends
 -----------------
 
-The system is designed to support different storage backends.
-The storage engine is configurable when calling mgmtd_cfg_db:init/2.
+The storage engine is configurable when calling `mgmtd_cfg_db:init/2`.
+Implemented backends: `mnesia` (default) and `sys_config`.
 
 Storage backends must provide a set of functions to mirror the mnesia API:
 
-init() - Called once at startup to allow the backend to create tables / init schema etc.
+init/2 - Called once at startup to allow the backend to create tables / init schema etc.
 
 transaction(Fun) - Run a transaction against the DB where Fun will perform any updates
 

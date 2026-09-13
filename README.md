@@ -63,8 +63,8 @@ Default prefix is omitted in the CLI. Named prefixes are a path token:
     set server servers foo port 8080
     set example server servers foo port 8080
 
-A later sys.config backend will use `{Prefix, Tree}` as the
-application-name grouping.
+The sys.config backend uses `{Prefix, Tree}` as the application-name
+grouping (`{default, Tree}` for the silent prefix).
 
 TODO
 ---

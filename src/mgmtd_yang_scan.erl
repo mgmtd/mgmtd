@@ -106,10 +106,13 @@ next(#yang_scan{buffer = B, line = L, column = C, stream = S, tokens = []}) ->
         Other ->
             Other
     end;
-next(#yang_scan{tokens = [eof]}) ->
-    eof;
 next(#yang_scan{tokens = [T | Ts]} = Scan) ->
-    {T, Scan#yang_scan{tokens = Ts}}.
+    case T of
+        eof ->
+            eof;
+        Token ->
+            {Token, Scan#yang_scan{tokens = Ts}}
+    end.
 
 next_string(Scan, StringToken) ->
     case wsp(Scan) of
@@ -300,6 +303,7 @@ read(undefined) ->
     eof;
 read({Fd, Size}) ->
     case file:read(Fd, Size) of
-        {ok, Bin} -> {ok, binary_to_list(Bin)};
+        {ok, Bin} when is_binary(Bin) -> {ok, binary_to_list(Bin)};
+        {ok, List} when is_list(List) -> {ok, List};
         Error -> Error
     end.
