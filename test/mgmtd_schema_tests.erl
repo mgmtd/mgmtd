@@ -21,9 +21,43 @@ parse_draft07_schema_test() ->
     ?assertEqual({int32, [{min, 1}, {max, 10}]}, CountType),
     #{type := LevelType} = mgmtd_schema:lookup(["level"]),
     ?assertEqual({int32, [{min, 1}, {max, 4}]}, LevelType),
-    #{node_type := leaf_list, min_elements := 1, max_elements := 4} =
+    #{node_type := leaf_list, min_elements := 1, max_elements := 4,
+      mandatory := false} =
         mgmtd_schema:lookup(["tags"]),
+    #{mandatory := false} = mgmtd_schema:lookup(["mode"]),
     ok = mgmtd:remove_schema().
+
+json_required_sets_mandatory_test() ->
+    mgmtd_sup:start_link(),
+    lists:foreach(fun mgmtd:remove_schema/1, mgmtd:registered_schemas()),
+    File = "test/json_schema_required.json",
+    ok = file:write_file(File, <<"{
+        \"$schema\": \"http://json-schema.org/draft-07/schema#\",
+        \"type\": \"object\",
+        \"required\": [\"name\"],
+        \"properties\": {
+            \"name\": {\"type\": \"string\"},
+            \"nick\": {\"type\": \"string\"},
+            \"svc\": {
+                \"type\": \"object\",
+                \"required\": [\"port\"],
+                \"properties\": {
+                    \"port\": {\"type\": \"integer\"},
+                    \"host\": {\"type\": \"string\"}
+                }
+            }
+        }
+    }">>),
+    try
+        ok = mgmtd:load_json_schema(File, #{config => true}),
+        #{mandatory := true} = mgmtd_schema:lookup(["name"]),
+        #{mandatory := false} = mgmtd_schema:lookup(["nick"]),
+        #{mandatory := true} = mgmtd_schema:lookup(["svc", "port"]),
+        #{mandatory := false} = mgmtd_schema:lookup(["svc", "host"])
+    after
+        file:delete(File),
+        mgmtd:remove_schema()
+    end.
 
 reject_draft04_schema_test() ->
     mgmtd_sup:start_link(),

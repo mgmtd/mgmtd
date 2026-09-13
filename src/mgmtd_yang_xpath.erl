@@ -1,5 +1,6 @@
-%% Evaluate YANG must/when/leafref/unique with OTP xmerl_xpath over an
-%% XML projection of the transaction tree (RFC 7950 §6.4, §10).
+%% Evaluate YANG must/when/leafref/unique/mandatory/min-elements/
+%% max-elements with OTP xmerl_xpath over an XML projection of the
+%% transaction tree (RFC 7950 §6.4, §7.6.5, §7.7.5, §7.8.6, §10).
 %%
 %% xmerl does not dispatch custom functions. current() is rewritten to
 %% an absolute path. RFC 7950 §10 functions are rewritten in the parsed
@@ -33,10 +34,17 @@ validate_txn1(Txn) ->
                      Txn, #cfg{_ = mgmtd_schema:ets_pat('_')}),
             {Doc, Index} = project_xml(Rows),
             Reverse = maps:fold(fun(P, E, Acc) -> Acc#{E => P} end, #{}, Index),
-            Env = #{doc => Doc, index => Index, reverse => Reverse, rows => Rows},
+            ByPath = maps:from_list([{P, C} || #cfg{path = P} = C <- Rows]),
+            Env = #{doc => Doc, index => Index, reverse => Reverse,
+                    rows => Rows, by_path => ByPath},
             case check_rows(Rows, Env) of
                 ok ->
-                    check_uniques(Rows);
+                    case check_uniques(Rows) of
+                        ok ->
+                            check_cardinality(Env);
+                        Error ->
+                            Error
+                    end;
                 Error ->
                     Error
             end
@@ -50,8 +58,14 @@ has_constraints() ->
             lists:any(fun schema_has_constraint/1, ets:tab2list(mgmtd_commands))
     end.
 
-schema_has_constraint(#schema{opts = Opts, type = Type}) ->
-    lists:keymember(must, 1, Opts)
+schema_has_constraint(#schema{opts = Opts, type = Type,
+                              mandatory = Mand,
+                              min_elements = Min,
+                              max_elements = Max}) ->
+    Mand =:= true
+        orelse (is_integer(Min) andalso Min > 0)
+        orelse (Max =/= unlimited)
+        orelse lists:keymember(must, 1, Opts)
         orelse lists:keymember('when', 1, Opts)
         orelse lists:keymember(unique, 1, Opts)
         orelse is_ref_type(Type);
@@ -268,6 +282,233 @@ instance_schema_path([H | T]) when is_tuple(H) ->
     instance_schema_path(T);
 instance_schema_path([H | T]) ->
     [H | instance_schema_path(T)].
+
+%%--------------------------------------------------------------------
+%% mandatory / min-elements / max-elements (RFC 7950 §7.6.5, §7.7.5, §7.8.6)
+%%
+%% Enforced when the parent is present (module root is always present).
+%% `when` false → not applicable. Flattened choice: only if that case
+%% is selected. config=false is skipped (not in the config datastore).
+%%--------------------------------------------------------------------
+
+check_cardinality(Env) ->
+    check_level([], Env).
+
+check_level(InstPath, Env) ->
+    check_nodes(mgmtd_schema:children(InstPath, show), InstPath, Env).
+
+check_nodes([], _Parent, _Env) ->
+    ok;
+check_nodes([Schema | Rest], Parent, Env) ->
+    case check_node(Schema, Parent, Env) of
+        ok ->
+            check_nodes(Rest, Parent, Env);
+        Error ->
+            Error
+    end.
+
+check_node(#{config := false}, _Parent, _Env) ->
+    ok;
+check_node(#{name := Name} = Schema, Parent, Env) ->
+    Path = Parent ++ [Name],
+    case when_applies(Schema, Path, Env) of
+        {ok, false} ->
+            ok;
+        {ok, true} ->
+            case case_applies(Schema, Parent, Env) of
+                false ->
+                    ok;
+                true ->
+                    check_node1(Schema, Path, Env)
+            end;
+        {error, _} = Err ->
+            Err
+    end;
+check_node(_, _Parent, _Env) ->
+    ok.
+
+when_applies(#{opts := Opts}, Path, Env) when is_list(Opts) ->
+    case proplists:get_value('when', Opts, undefined) of
+        undefined ->
+            {ok, true};
+        Expr ->
+            eval_when(Expr, Path, Env)
+    end;
+when_applies(_, _Path, _Env) ->
+    {ok, true}.
+
+%% A flattened choice node is only required if its case is selected
+%% (some node from that case exists). Choice-level mandatory is the
+%% exclusive-case gap, not this pass.
+case_applies(#{opts := Opts}, Parent, Env) when is_list(Opts) ->
+    case proplists:get_value(choice, Opts, undefined) of
+        undefined ->
+            true;
+        Choice ->
+            Case = proplists:get_value('case', Opts),
+            lists:any(
+              fun(Sib) ->
+                      same_choice_case(Sib, Choice, Case)
+                          andalso sibling_present(Sib, Parent, Env)
+              end, mgmtd_schema:children(Parent, show))
+    end;
+case_applies(_, _Parent, _Env) ->
+    true.
+
+same_choice_case(#{opts := Opts}, Choice, Case) when is_list(Opts) ->
+    proplists:get_value(choice, Opts, undefined) =:= Choice
+        andalso proplists:get_value('case', Opts, undefined) =:= Case;
+same_choice_case(_, _Choice, _Case) ->
+    false.
+
+sibling_present(#{name := Name, node_type := Type} = Schema, Parent, Env) ->
+    node_present(Type, Schema, Parent ++ [Name], Env);
+sibling_present(_, _Parent, _Env) ->
+    false.
+
+check_node1(#{node_type := leaf, mandatory := true}, Path, Env) ->
+    case node_present(leaf, #{}, Path, Env) of
+        true ->
+            ok;
+        false ->
+            {error, {mandatory_failed, Path}}
+    end;
+check_node1(#{node_type := leaf}, _Path, _Env) ->
+    ok;
+check_node1(#{node_type := leaf_list} = Schema, Path, Env) ->
+    check_count(Path, leaf_list_count(Path, Env), min_of(Schema), max_of(Schema));
+check_node1(#{node_type := list} = Schema, Path, Env) ->
+    Keys = list_instance_keys(Path, Env),
+    case check_count(Path, length(Keys), min_of(Schema), max_of(Schema)) of
+        ok ->
+            check_list_instances(Path, Keys, Env);
+        Error ->
+            Error
+    end;
+check_node1(#{node_type := container, mandatory := true} = Schema, Path, Env) ->
+    case node_present(container, Schema, Path, Env) of
+        false ->
+            {error, {mandatory_failed, Path}};
+        true ->
+            check_level(Path, Env)
+    end;
+check_node1(#{node_type := container} = Schema, Path, Env) ->
+    case node_present(container, Schema, Path, Env) of
+        true ->
+            check_level(Path, Env);
+        false ->
+            ok
+    end;
+check_node1(_, _Path, _Env) ->
+    ok.
+
+check_list_instances(_Path, [], _Env) ->
+    ok;
+check_list_instances(Path, [Key | Rest], Env) ->
+    case check_level(Path ++ [Key], Env) of
+        ok ->
+            check_list_instances(Path, Rest, Env);
+        Error ->
+            Error
+    end.
+
+check_count(Path, Count, Min, Max) ->
+    if Count < Min ->
+            {error, {min_elements_failed, Path, Min, Count}};
+       Max =/= unlimited andalso Count > Max ->
+            {error, {max_elements_failed, Path, Max, Count}};
+       true ->
+            ok
+    end.
+
+min_of(#{node_type := leaf_list, mandatory := true, min_elements := Min})
+  when is_integer(Min), Min < 1 ->
+    1;
+min_of(#{min_elements := Min}) when is_integer(Min) ->
+    Min;
+min_of(_) ->
+    0.
+
+max_of(#{max_elements := Max}) ->
+    Max;
+max_of(_) ->
+    unlimited.
+
+node_present(leaf, _Schema, Path, #{by_path := ByPath}) ->
+    maps:is_key(Path, ByPath);
+node_present(leaf_list, _Schema, Path, Env) ->
+    leaf_list_count(Path, Env) > 0;
+node_present(list, _Schema, Path, Env) ->
+    list_instance_keys(Path, Env) =/= [];
+node_present(container, Schema, Path, Env) ->
+    is_module_root(Schema)
+        orelse maps:is_key(Path, maps:get(by_path, Env))
+        orelse has_descendant(Path, maps:get(rows, Env));
+node_present(_, _Schema, Path, #{by_path := ByPath}) ->
+    maps:is_key(Path, ByPath).
+
+is_module_root(#{node_type := container, path := [Name], ns := Ns})
+  when Ns =/= default ->
+    atom_to_list(Ns) =:= Name;
+is_module_root(_) ->
+    false.
+
+has_descendant(Path, Rows) ->
+    lists:any(fun(#cfg{path = P}) ->
+                      P =/= Path andalso lists:prefix(Path, P)
+              end, Rows).
+
+leaf_list_count(Path, #{by_path := ByPath}) ->
+    case maps:find(Path, ByPath) of
+        {ok, #cfg{value = Vals}} when is_list(Vals) ->
+            length(Vals);
+        {ok, _} ->
+            1;
+        error ->
+            0
+    end.
+
+list_instance_keys(ListPath, #{rows := Rows}) ->
+    Len = length(ListPath),
+    [lists:last(P) || #cfg{node_type = list_key, path = P} <- Rows,
+                      length(P) =:= Len + 1,
+                      lists:prefix(ListPath, P),
+                      is_tuple(lists:last(P))].
+
+eval_when(Expr, Path, #{index := Index} = Env) ->
+    case maps:is_key(Path, Index) of
+        true ->
+            eval_bool(Expr, Path, Env);
+        false ->
+            eval_bool_synthetic(Expr, Path, Env)
+    end.
+
+eval_bool_synthetic(Expr, Path, Env) ->
+    Rewritten = rewrite_expr(Expr, Path),
+    try
+        Tokens = xmerl_xpath_scan:tokens(Rewritten),
+        {ok, Parsed} = xmerl_xpath_parse:parse(Tokens),
+        Ctx = synthetic_context(Path, Env),
+        Ast1 = collapse_ns(rewrite_ast(Parsed, Ctx, Env)),
+        {ok, xmerl_xpath_pred:eval(Ast1, Ctx)}
+    catch
+        exit:Reason ->
+            {error, {xpath_error, Path, Expr, Reason}};
+        error:Reason ->
+            {error, {xpath_error, Path, Expr, Reason}}
+    end.
+
+synthetic_context(Path, #{index := Index, doc := Doc}) ->
+    Name = name_atom(lists:last(Path)),
+    Parent = lists:droplast(Path),
+    Dummy =
+        case maps:find(Parent, Index) of
+            {ok, #xmlElement{name = PName, pos = PPos, parents = PParents}} ->
+                xml_el(Name, PParents ++ [{PName, PPos}], 1, []);
+            error ->
+                xml_el(Name, [], 1, [])
+        end,
+    xpath_context(Dummy, Doc).
 
 eval_bool(Expr, Path, #{index := Index, doc := Doc} = Env) ->
     case maps:find(Path, Index) of

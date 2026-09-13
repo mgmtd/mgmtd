@@ -1,0 +1,82 @@
+module example-cardinality {
+  namespace "urn:example:cardinality";
+  prefix card;
+
+  leaf hostname {
+    type string;
+    mandatory true;
+  }
+
+  container box {
+    leaf flag {
+      type boolean;
+    }
+    leaf name {
+      type string;
+      mandatory true;
+    }
+    leaf extra {
+      type string;
+      when "../flag = 'true'";
+      mandatory true;
+    }
+  }
+
+  container tagged {
+    leaf keep {
+      type boolean;
+    }
+    leaf-list tags {
+      type string;
+      min-elements 1;
+      max-elements 2;
+    }
+  }
+
+  container items {
+    list item {
+      key "id";
+      max-elements 2;
+      leaf id {
+        type string;
+      }
+      leaf value {
+        type string;
+        mandatory true;
+      }
+    }
+  }
+
+  container pools {
+    leaf enabled {
+      type boolean;
+    }
+    list pool {
+      key "name";
+      min-elements 1;
+      leaf name {
+        type string;
+      }
+    }
+  }
+
+  container link {
+    choice type {
+      case ethernet {
+        leaf eth-name {
+          type string;
+          mandatory true;
+        }
+        leaf eth-speed {
+          type uint8;
+        }
+      }
+      case atm {
+        leaf vpi {
+          type uint16;
+          mandatory true;
+        }
+      }
+    }
+  }
+}

@@ -649,6 +649,150 @@ xpath_section10_functions_test() ->
         mgmtd_cfg_db:remove_db(Db, [{backend, mnesia}])
     end.
 
+compile_cardinality_test() ->
+    {ok, #{nodes := Nodes}} =
+        mgmtd_schema_yang:compile_file("test/yang/example-cardinality.yang"),
+    #leaf{name = "hostname", mandatory = true} =
+        lists:keyfind("hostname", #leaf.name, Nodes),
+    #container{name = "box", children = Box} =
+        lists:keyfind("box", #container.name, Nodes),
+    Kids = Box(),
+    #leaf{name = "name", mandatory = true} =
+        lists:keyfind("name", #leaf.name, Kids),
+    #container{name = "tagged", children = Tagged} =
+        lists:keyfind("tagged", #container.name, Nodes),
+    #leaf_list{name = "tags", min_elements = 1, max_elements = 2} =
+        lists:keyfind("tags", #leaf_list.name, Tagged()),
+    #container{name = "items", children = Items} =
+        lists:keyfind("items", #container.name, Nodes),
+    #list{name = "item", max_elements = 2, children = Item} =
+        lists:keyfind("item", #list.name, Items()),
+    #leaf{name = "value", mandatory = true} =
+        lists:keyfind("value", #leaf.name, Item()),
+    #container{name = "pools", children = Pools} =
+        lists:keyfind("pools", #container.name, Nodes),
+    #list{name = "pool", min_elements = 1} =
+        lists:keyfind("pool", #list.name, Pools()).
+
+cardinality_commit_test() ->
+    start_mgmtd(),
+    lists:foreach(fun mgmtd:remove_schema/1, mgmtd:registered_schemas()),
+    Db = "test_db_yang_card",
+    ok = mgmtd_cfg_db:remove_db(Db, [{backend, mnesia}]),
+    ok = mgmtd:load_yang_module("test/yang/example-cardinality.yang"),
+    ok = mgmtd_cfg_db:init(Db, [{backend, mnesia}]),
+    try
+        {error, {mandatory_failed, ["card", "hostname"]}} =
+            mgmtd:txn_commit(mgmtd:txn_new()),
+        {ok, _} = commit_paths([["card", "hostname", "box1"]]),
+        {ok, PFlag} = mgmtd_schema:lookup_path(["card", "box", "flag", "false"]),
+        {ok, TxnFlag} = mgmtd:txn_set(mgmtd:txn_new(), PFlag),
+        {error, {mandatory_failed, ["card", "box", "name"]}} =
+            mgmtd:txn_commit(TxnFlag),
+        {ok, _} = commit_paths([["card", "hostname", "box1"],
+                                ["card", "box", "name", "n1"]]),
+        {ok, PTrue} = mgmtd_schema:lookup_path(["card", "box", "flag", "true"]),
+        {ok, TxnWhen} = mgmtd:txn_set(mgmtd:txn_new(), PTrue),
+        {error, {mandatory_failed, ["card", "box", "extra"]}} =
+            mgmtd:txn_commit(TxnWhen),
+        {ok, _} = commit_paths([["card", "box", "flag", "false"]]),
+        {ok, _} = commit_paths([["card", "box", "flag", "true"],
+                                ["card", "box", "extra", "e"]]),
+        {ok, PKeep} = mgmtd_schema:lookup_path(["card", "tagged", "keep", "true"]),
+        {ok, TxnKeep} = mgmtd:txn_set(mgmtd:txn_new(), PKeep),
+        {error, {min_elements_failed, ["card", "tagged", "tags"], 1, 0}} =
+            mgmtd:txn_commit(TxnKeep),
+        {ok, PTags} = mgmtd_schema:lookup_path(
+                        ["card", "tagged", "tags", ["a", "b", "c"]]),
+        {ok, TxnTags} = mgmtd:txn_set(mgmtd:txn_new(), PTags),
+        {error, {max_elements_failed, ["card", "tagged", "tags"], 2, 3}} =
+            mgmtd:txn_commit(TxnTags),
+        {ok, _} = commit_paths([["card", "tagged", "tags", ["red"]]]),
+        {ok, PItem} = mgmtd_schema:lookup_path(["card", "items", "item", {"i1"}]),
+        {ok, TxnItem} = mgmtd:txn_set(mgmtd:txn_new(), PItem),
+        {error, {mandatory_failed, ["card", "items", "item", {"i1"}, "value"]}} =
+            mgmtd:txn_commit(TxnItem),
+        {ok, _} = commit_paths([["card", "items", "item", {"i1"}, "value", "v"]]),
+        {ok, _} = commit_paths([["card", "items", "item", {"i2"}, "value", "w"]]),
+        {ok, PItem3} = mgmtd_schema:lookup_path(
+                         ["card", "items", "item", {"i3"}, "value", "x"]),
+        {ok, Txn3} = mgmtd:txn_set(mgmtd:txn_new(), PItem3),
+        {error, {max_elements_failed, ["card", "items", "item"], 2, 3}} =
+            mgmtd:txn_commit(Txn3),
+        {ok, PEn} = mgmtd_schema:lookup_path(["card", "pools", "enabled", "true"]),
+        {ok, TxnEn} = mgmtd:txn_set(mgmtd:txn_new(), PEn),
+        {error, {min_elements_failed, ["card", "pools", "pool"], 1, 0}} =
+            mgmtd:txn_commit(TxnEn),
+        {ok, _} = commit_paths([["card", "pools", "pool", {"p1"}]]),
+        {ok, PSpeed} = mgmtd_schema:lookup_path(
+                         ["card", "link", "eth-speed", "1"]),
+        {ok, TxnSp} = mgmtd:txn_set(mgmtd:txn_new(), PSpeed),
+        {error, {mandatory_failed, ["card", "link", "eth-name"]}} =
+            mgmtd:txn_commit(TxnSp),
+        {ok, _} = commit_paths([["card", "link", "eth-name", "eth0"]]),
+        {ok, PVPI} = mgmtd_schema:lookup_path(["card", "link", "vpi", "8"]),
+        {ok, TxnV} = mgmtd:txn_set(mgmtd:txn_new(), PVPI),
+        {ok, _} = mgmtd:txn_commit(TxnV)
+    after
+        mgmtd:remove_schema(card),
+        mgmtd_cfg_db:remove_db(Db, [{backend, mnesia}])
+    end.
+
+function_cardinality_commit_test() ->
+    start_mgmtd(),
+    lists:foreach(fun mgmtd:remove_schema/1, mgmtd:registered_schemas()),
+    Db = "test_db_fun_card",
+    ok = mgmtd_cfg_db:remove_db(Db, [{backend, mnesia}]),
+    ok = mgmtd:load_function_schema(fun cardinality_fun_schema/0),
+    ok = mgmtd_cfg_db:init(Db, [{backend, mnesia}]),
+    try
+        {ok, _} = mgmtd:txn_commit(mgmtd:txn_new()),
+        {ok, PId} = mgmtd_schema:lookup_path(["svc", "id", "a"]),
+        {ok, TxnId} = mgmtd:txn_set(mgmtd:txn_new(), PId),
+        {error, {min_elements_failed, ["svc", "workers"], 1, 0}} =
+            mgmtd:txn_commit(TxnId),
+        {ok, PWorker} = mgmtd_schema:lookup_path(["svc", "workers", {"w1"}]),
+        {ok, TxnW} = mgmtd:txn_set(mgmtd:txn_new(), PWorker),
+        {error, {mandatory_failed, ["svc", "id"]}} =
+            mgmtd:txn_commit(TxnW),
+        {ok, _} = commit_paths([["svc", "id", "a"],
+                                ["svc", "workers", {"w1"}]]),
+        {ok, _} = commit_paths([["svc", "workers", {"w2"}]]),
+        {ok, P3} = mgmtd_schema:lookup_path(["svc", "workers", {"w3"}]),
+        {ok, Txn3} = mgmtd:txn_set(mgmtd:txn_new(), P3),
+        {error, {max_elements_failed, ["svc", "workers"], 2, 3}} =
+            mgmtd:txn_commit(Txn3)
+    after
+        mgmtd:remove_schema(),
+        mgmtd_cfg_db:remove_db(Db, [{backend, mnesia}])
+    end.
+
+cardinality_fun_schema() ->
+    [#container{name = "svc",
+                config = true,
+                children =
+                    fun() ->
+                            [#leaf{name = "id", type = string, mandatory = true},
+                             #list{name = "workers",
+                                   key_names = ["name"],
+                                   min_elements = 1,
+                                   max_elements = 2,
+                                   children =
+                                       fun() ->
+                                               [#leaf{name = "name",
+                                                      type = string}]
+                                       end}]
+                    end}].
+
+commit_paths(Paths) ->
+    Txn = lists:foldl(
+            fun(Path, Acc) ->
+                    {ok, SP} = mgmtd_schema:lookup_path(Path),
+                    {ok, Acc1} = mgmtd:txn_set(Acc, SP),
+                    Acc1
+            end, mgmtd:txn_new(), Paths),
+    mgmtd:txn_commit(Txn).
+
 must_and_when_stored_on_opts_test() ->
     Yang = <<"
         module m {

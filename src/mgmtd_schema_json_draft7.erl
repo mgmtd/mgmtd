@@ -36,20 +36,24 @@ load_json_schema(#{<<"$schema">> := Other}, _Opts) ->
 load_json_schema(_Schema, _Opts) ->
     {error, {unsupported_json_schema, missing_dollar_schema}}.
 
-load_json_schema(#{<<"properties">> := Props}, Path, Ns, Opts) ->
-    load_json_properties(Props, Path, Ns, Opts).
+load_json_schema(#{} = Schema, Path, Ns, Opts) ->
+    Required = json_required(Schema),
+    load_json_properties(maps:get(<<"properties">>, Schema, #{}),
+                         Path, Ns, Opts, Required).
 
-load_json_properties(Props, Path, Ns, Opts) ->
+load_json_properties(Props, Path, Ns, Opts, Required) ->
     maps:foreach(fun(K, V) ->
                          Name = binary_to_list(K),
-                         load_json_property(V, Name, [Name | Path], Ns, Opts)
+                         load_json_property(V, Name, [Name | Path], Ns, Opts,
+                                            lists:member(Name, Required))
                  end, Props).
 
 load_json_property(#{<<"type">> := <<"object">>} = Object,
                    Key,
                    Path,
                    Ns,
-                   #{config := Config} = Opts) ->
+                   #{config := Config} = Opts,
+                   Mandatory) ->
     %% A container
     Callback = json_callback(Opts, Config),
     Container =
@@ -59,15 +63,18 @@ load_json_property(#{<<"type">> := <<"object">>} = Object,
                 name = Key,
                 desc = json_desc(Object),
                 data_callback = Callback,
+                mandatory = Mandatory,
                 config = Config},
     %% io:format(user, "O - ~p~n", [lists:reverse(Path)]),
     true = ets:insert_new(mgmtd_commands, Container),
-    load_json_properties(maps:get(<<"properties">>, Object, #{}), Path, Ns, Opts);
+    load_json_properties(maps:get(<<"properties">>, Object, #{}), Path, Ns, Opts,
+                         json_required(Object));
 load_json_property(#{<<"type">> := <<"array">>} = Object,
                    Key,
                    Path,
                    Ns,
-                   #{config := Config} = Opts) ->
+                   #{config := Config} = Opts,
+                   _Mandatory) ->
     %% An array, this could be a list or a leaf-list.
     %% Decide based on whether items is a single leaf type (leaf-list)
     case is_leaf_list_array(Object) of
@@ -88,7 +95,7 @@ load_json_property(#{<<"type">> := <<"array">>} = Object,
                         min_elements = maps:get(<<"minItems">>, Object, 0),
                         max_elements = maps:get(<<"maxItems">>, Object, unlimited),
                         data_callback = Callback,
-                        mandatory = true,
+                        mandatory = false,
                         config = Config
                        },
             true = ets:insert_new(mgmtd_commands, LeafList);
@@ -131,9 +138,11 @@ load_json_property(#{<<"type">> := <<"array">>} = Object,
             true = ets:insert_new(mgmtd_commands, List),
             ok = mgmtd_schema:mark_has_list_descendent(Ns, tl(Path)),
             Items = maps:get(<<"items">>, Object),
-            load_json_properties(maps:get(<<"properties">>, Items), Path, Ns, Opts)
+            load_json_properties(maps:get(<<"properties">>, Items, #{}), Path, Ns, Opts,
+                                 json_required(Items))
     end;
-load_json_property(#{} = Item, Key, Path, Ns, #{config := Config} = Opts) ->
+load_json_property(#{} = Item, Key, Path, Ns, #{config := Config} = Opts,
+                   Mandatory) ->
     Type = json_item_type(Item),
     Default = json_default(Type, Item),
     Callback = json_callback(Opts, Config),
@@ -145,11 +154,17 @@ load_json_property(#{} = Item, Key, Path, Ns, #{config := Config} = Opts) ->
                 type = json_item_type(Item),
                 desc = json_desc(Item),
                 default = Default,
-                mandatory = true,
+                mandatory = Mandatory,
                 data_callback = Callback,
                 config = Config},
                                                 %io:format(user, "L - ~p~n", [lists:reverse(Path)]),
     true = ets:insert_new(mgmtd_commands, Leaf).
+
+json_required(Object) when is_map(Object) ->
+    [binary_to_list(N) || N <- maps:get(<<"required">>, Object, []),
+                          is_binary(N)];
+json_required(_) ->
+    [].
 
 ensure_prefix_container(?DEFAULT_NS, _Opts) ->
     [];

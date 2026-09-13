@@ -116,6 +116,7 @@ load_node(#leaf_list{name = Name, desc = Desc, type = Type, config = Config0} = 
                 data_callback = Callback,
                 min_elements = Node#leaf_list.min_elements,
                 max_elements = Node#leaf_list.max_elements,
+                mandatory = Node#leaf_list.mandatory,
                 config = Config,
                 opts = Node#leaf_list.opts},
     true = ets:insert_new(mgmtd_commands, LeafList).
@@ -226,6 +227,7 @@ load_node_resolved(#leaf_list{name = Name, desc = Desc, type = Type, config = Co
                 data_callback = Callback,
                 min_elements = Node#leaf_list.min_elements,
                 max_elements = Node#leaf_list.max_elements,
+                mandatory = Node#leaf_list.mandatory,
                 config = Config,
                 opts = origin_opts(Node#leaf_list.opts, Origin)},
     true = ets:insert_new(mgmtd_commands, LeafList).
