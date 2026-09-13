@@ -15,7 +15,9 @@
         {
          txn_id,
          ops = [],
-         ets_copy
+         ets_copy,
+         baseline :: ets:table() | undefined,
+         replace = false :: boolean()
         }).
 
 -type txn() :: #cfg_txn{}.
@@ -23,27 +25,88 @@
 -export_type([txn/0]).
 
 -export([new/0, exit_txn/1, get/2, get_tree/2, get_tree/3, set/3, delete/2, list_keys/3,
-         match_object/2, commit/1]).
+         match_object/2, commit/1, rollback/2, will_change/1,
+         tree/1, baseline_tree/1]).
 
 new() ->
     TxnId = erlang:unique_integer(),
+    Copy = mgmtd_cfg_db:copy_to_ets(),
     #cfg_txn{txn_id = TxnId,
-             ets_copy = mgmtd_cfg_db:copy_to_ets()
+             ets_copy = Copy,
+             baseline = snapshot_ets(Copy)
             }.
 
-exit_txn(#cfg_txn{ets_copy = EtsCopy}) ->
+exit_txn(#cfg_txn{ets_copy = EtsCopy, baseline = Baseline}) ->
     catch ets:delete(EtsCopy),
+    catch ets:delete(Baseline),
     ok.
+
+snapshot_ets(Src) ->
+    Dst = ets:new(cfg_txn_base, [public, ordered_set, {keypos, #cfg.path}]),
+    true = ets:insert(Dst, ets:tab2list(Src)),
+    Dst.
+
+%% Session working tree (after local edits).
+tree(#cfg_txn{} = Txn) ->
+    get_tree(Txn, []).
+
+%% Snapshot of running taken when the session started.
+baseline_tree(#cfg_txn{baseline = undefined}) ->
+    [];
+baseline_tree(#cfg_txn{baseline = Baseline}) ->
+    get_tree_from({ets, Baseline}, []).
 
 %% @doc commit the operations stored up in the configuration transaction.
 %% Ops are recorded newest-first; apply oldest-first so a delete then
 %% re-add of the same list item in one session lands as the re-add.
+%% A rollback-loaded txn (`replace = true`) writes the whole ETS copy.
+commit(#cfg_txn{replace = true} = Txn) ->
+    case will_change(Txn) of
+        false ->
+            commit(Txn#cfg_txn{replace = false, ops = []});
+        true ->
+            case mgmtd_yang_xpath:validate_txn(Txn) of
+                {error, _} = Err ->
+                    Err;
+                ok ->
+                    commit_replace(Txn)
+            end
+    end;
 commit(#cfg_txn{ops = Ops} = Txn) ->
     case mgmtd_yang_xpath:validate_txn(Txn) of
         {error, _} = Err ->
             Err;
         ok ->
             commit_ops(Txn, Ops)
+    end.
+
+commit_replace(#cfg_txn{ets_copy = Ets} = Txn) ->
+    Rows = ets:tab2list(Ets),
+    case mgmtd_cfg_db:transaction(fun() -> mgmtd_cfg_db:replace_all(Rows) end) of
+        ok ->
+            ok = exit_txn(Txn),
+            {ok, new()};
+        Err ->
+            Err
+    end.
+
+-spec will_change(#cfg_txn{}) -> boolean().
+will_change(#cfg_txn{replace = true, ets_copy = Ets}) ->
+    not mgmtd_cfg_rollback:same_as_running(ets:tab2list(Ets));
+will_change(#cfg_txn{ops = []}) ->
+    false;
+will_change(#cfg_txn{}) ->
+    true.
+
+-spec rollback(#cfg_txn{}, non_neg_integer()) -> {ok, #cfg_txn{}} | {error, term()}.
+rollback(#cfg_txn{ets_copy = Ets} = Txn, Index) when is_integer(Index), Index >= 0 ->
+    case mgmtd_cfg_rollback:read(Index) of
+        {ok, Rows} ->
+            true = ets:delete_all_objects(Ets),
+            _ = [ets:insert(Ets, Row) || Row <- Rows],
+            {ok, Txn#cfg_txn{replace = true, ops = []}};
+        {error, _} = Err ->
+            Err
     end.
 
 commit_ops(#cfg_txn{} = Txn, Ops) ->

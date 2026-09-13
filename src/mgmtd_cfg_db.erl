@@ -10,7 +10,7 @@
 
 -include("mgmtd_schema.hrl").
 
--export([init/2, remove_db/2, transaction/1, copy_to_ets/0]).
+-export([init/2, remove_db/2, transaction/1, copy_to_ets/0, replace_all/1]).
 
 -export([insert_path_items/3, check_conflict/3, delete_path_items/2]).
 
@@ -36,7 +36,8 @@ init(DbLocation, Opts) ->
     case BackendMod:init(DbLocation, Opts) of
         ok ->
             ets:insert(mgmtd_meta, {backend, BackendMod}),
-            to_ok(ets:insert(mgmtd_meta, {db_location, DbLocation}));
+            true = ets:insert(mgmtd_meta, {db_location, DbLocation}),
+            mgmtd_cfg_rollback:init(DbLocation, rollback_count(Opts));
         {error, _} = Err ->
             Err
     end.
@@ -131,6 +132,41 @@ list_keys({ets, Ets}, Path, Pattern) ->
 copy_to_ets() ->
     BackendMod = backend(),
     BackendMod:copy_to_ets().
+
+%% Replace every `#cfg{}` row with `Rows`. Must run inside `transaction/1`.
+-spec replace_all([#cfg{}]) -> ok.
+replace_all(Rows) when is_list(Rows) ->
+    match_delete(permanent, #cfg{_ = mgmtd_schema:ets_pat('_')}),
+    lists:foreach(fun(#cfg{} = Cfg) -> write(permanent, Cfg) end, Rows),
+    ok.
+
+rollback_count(Opts) ->
+    case proplists:get_value(rollback, Opts, undefined) of
+        undefined ->
+            env_rollback_count();
+        N when is_integer(N), N >= 0 ->
+            N;
+        Props when is_list(Props) ->
+            case proplists:get_value(count, Props, 10) of
+                N when is_integer(N), N >= 0 -> N;
+                _ -> 10
+            end;
+        _ ->
+            10
+    end.
+
+env_rollback_count() ->
+    case application:get_env(mgmtd, rollback, []) of
+        N when is_integer(N), N >= 0 ->
+            N;
+        Props when is_list(Props) ->
+            case proplists:get_value(count, Props, 10) of
+                N when is_integer(N), N >= 0 -> N;
+                _ -> 10
+            end;
+        _ ->
+            10
+    end.
 
 backend() ->
     case ets:lookup(mgmtd_meta, backend) of

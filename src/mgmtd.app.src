@@ -11,7 +11,8 @@
     cowboy,
     erlydtl
    ]},
-  {env, [{restconf, [{enabled, false}, {port, 8008}]}]},
+  {env, [{restconf, [{enabled, false}, {port, 8008}]},
+         {rollback, [{count, 10}]}]},
   {modules, []},
 
   {licenses, ["Apache 2.0"]},

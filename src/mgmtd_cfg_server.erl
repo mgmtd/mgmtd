@@ -158,8 +158,23 @@ handle_call({commit, Txn}, _From, State) ->
     Subscriptions = [K || {K,[]} <- ets:tab2list(State#state.subs)],
     %% io:format(user, "with subscriptions ~p~n", [Subscriptions]),
     Messages = subscription_messages(Subscriptions, Txn),
+    Changing = mgmtd_cfg_txn:will_change(Txn),
     case mgmtd_cfg_txn:commit(Txn) of
         {ok, Txn2} ->
+            case Changing of
+                true ->
+                    try mgmtd_cfg_rollback:rotate_after_commit() of
+                        ok ->
+                            ok;
+                        {error, _} ->
+                            ok
+                    catch
+                        _:_ ->
+                            ok
+                    end;
+                false ->
+                    ok
+            end,
             send_subscription_messages(Messages),
             Etag = State#state.etag + 1,
             {reply, {ok, Txn2}, State#state{etag = Etag}};

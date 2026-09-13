@@ -15,7 +15,10 @@
          registered_schemas/0,
          load_config_db/1]).
 %% Transaction API
--export([txn_new/0, txn_exit/1, txn_set/2, txn_delete/2, txn_show/2, txn_show/3, txn_commit/1]).
+-export([txn_new/0, txn_exit/1, txn_set/2, txn_delete/2, txn_show/2, txn_show/3, txn_commit/1,
+         txn_diff/1, txn_diff/2, txn_diff/3, txn_diff_text/1, txn_diff_text/2, txn_diff_text/3,
+         format_diff/1,
+         rollback_list/0, rollback_show/1, txn_rollback/2, rollback/1]).
 %% Schema API
 -export([schema_children/2, schema_children/3]).
 
@@ -154,6 +157,84 @@ txn_show(Txn, SchemaPath, Opts) when is_map(Opts) ->
 
 txn_commit(Txn) ->
     mgmtd_cfg_server:commit(Txn).
+
+%% @doc Net changes in this configuration session versus the snapshot
+%% taken at `txn_new/0`.
+%%
+%% Returns `{ok, Changes}` where each change is one of:
+%%
+%%   `{add, Path, Tree}`            — subtree present only in the session
+%%   `{delete, Path, Tree}`         — subtree present only in the baseline
+%%   `{set, Path, Old, New}`        — leaf / leaf-list value change
+%%                                    (`undefined` means missing)
+%%
+%% `Path` is an item path (list keys as tuples). `Tree` is the same
+%% simplified shape as `txn_show/2`.
+%%
+%% Options:
+%%   against => session | running | {rollback, N}
+%%     session (default) — vs the copy of running from when the session started
+%%     running           — vs currently committed config
+%%     {rollback, N}     — vs rollback snapshot N
+-spec txn_diff(mgmtd_cfg_txn:txn() | undefined) ->
+          {ok, [mgmtd_cfg_diff:change()]} | {error, term()}.
+txn_diff(Txn) ->
+    txn_diff(Txn, [], #{}).
+
+txn_diff(Txn, Path) ->
+    txn_diff(Txn, Path, #{}).
+
+txn_diff(Txn, Path, Opts) when is_map(Opts) ->
+    mgmtd_cfg_diff:diff(Txn, Path, Opts).
+
+%% @doc Same as `txn_diff/1,2,3` but formatted as Junos-style
+%% `show | compare` text (`[edit …]` hunks with `+` / `-` lines).
+txn_diff_text(Txn) ->
+    txn_diff_text(Txn, [], #{}).
+
+txn_diff_text(Txn, Path) ->
+    txn_diff_text(Txn, Path, #{}).
+
+txn_diff_text(Txn, Path, Opts) when is_map(Opts) ->
+    case txn_diff(Txn, Path, Opts) of
+        {ok, Changes} ->
+            {ok, format_diff(Changes)};
+        {error, _} = Err ->
+            Err
+    end.
+
+-spec format_diff([mgmtd_cfg_diff:change()]) -> iodata().
+format_diff(Changes) ->
+    mgmtd_cfg_diff:format(Changes).
+
+%% @doc Previous committed snapshots. Index `1` is the last commit
+%% before running; running itself is not listed.
+rollback_list() ->
+    mgmtd_cfg_rollback:list().
+
+rollback_show(Index) when is_integer(Index), Index >= 0 ->
+    mgmtd_cfg_rollback:show(Index).
+
+txn_rollback(Txn, Index) when is_integer(Index), Index >= 0 ->
+    mgmtd_cfg_txn:rollback(Txn, Index).
+
+%% @doc Load rollback `Index` and commit it as running.
+rollback(Index) when is_integer(Index), Index >= 0 ->
+    Txn = txn_new(),
+    case txn_rollback(Txn, Index) of
+        {ok, Txn1} ->
+            case txn_commit(Txn1) of
+                {ok, Txn2} ->
+                    ok = txn_exit(Txn2),
+                    ok;
+                {error, _} = Err ->
+                    try txn_exit(Txn1) catch _:_ -> ok end,
+                    Err
+            end;
+        {error, _} = Err ->
+            try txn_exit(Txn) catch _:_ -> ok end,
+            Err
+    end.
 
 %% Built in set of data_callback API callbacks when using the
 %% built in configuration database. Operational lists are served by
