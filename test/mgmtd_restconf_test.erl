@@ -29,6 +29,7 @@ listener_test_() ->
 
 setup() ->
     Prev = save_env(),
+    _ = application:load(mgmtd),
     ok = application:set_env(mgmtd, restconf, [{enabled, true}, {port, 0}]),
     ok = mgmtd_restconf:start(),
     {ok, _} = application:ensure_all_started(inets),

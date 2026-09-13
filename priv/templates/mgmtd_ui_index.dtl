@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>mgmtd</title>
+  <link rel="stylesheet" href="{{ css_href }}">
+</head>
+<body class="mgmtd-ui-page">
+  <div class="mgmtd-shell">
+    <header class="mgmtd-chrome">
+      <h1>mgmtd</h1>
+      {{ mode_switch_html|safe }}
+    </header>
+    {% include "mgmtd_ui_content.dtl" %}
+  </div>
+</body>
+</html>

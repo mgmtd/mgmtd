@@ -8,7 +8,8 @@
     stdlib,
     xmerl,
     json_polyfill,
-    cowboy
+    cowboy,
+    erlydtl
    ]},
   {env, [{restconf, [{enabled, false}, {port, 8008}]}]},
   {modules, []},

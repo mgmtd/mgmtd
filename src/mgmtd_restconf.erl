@@ -7,6 +7,10 @@
 %%
 %% `enabled` defaults to true. `{restconf, false}` leaves the HTTP
 %% listener off; `{restconf, true}` is the default port.
+%%
+%% Schema snapshot for clients is `GET /mgmtd/schema` (not RESTCONF).
+%% HTML UI is not served here: hosts mount `mgmtd_ui:cowboy_routes/0`
+%% on their own Cowboy listener.
 %% @end
 %%%-------------------------------------------------------------------
 -module(mgmtd_restconf).
@@ -53,6 +57,8 @@ start_listener() ->
     {ok, _} = application:ensure_all_started(cowboy),
     Dispatch = cowboy_router:compile(
                  [{'_', [
+                         {"/mgmtd/schema", mgmtd_ui_schema_handler, []},
+                         {"/mgmtd/schema/", mgmtd_ui_schema_handler, []},
                          {"/.well-known/host-meta", mgmtd_restconf_handler, []},
                          {"/restconf/[...]", mgmtd_restconf_handler, []}
                         ]}]),

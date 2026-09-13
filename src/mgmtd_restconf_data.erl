@@ -10,7 +10,8 @@
 
 -export([get/2, resource/2,
          put/2, post/2, patch/2, delete/1,
-         http/3]).
+         http/3,
+         etag_value/0, check_etag/1]).
 
 -define(JSON, <<"application/yang-data+json">>).
 
@@ -350,26 +351,30 @@ allow(Path) ->
             <<"GET, HEAD, OPTIONS">>
     end.
 
+-spec etag_value() -> binary().
 etag_value() ->
     iolist_to_binary([$", integer_to_list(mgmtd_cfg_server:etag()), $"]).
 
-check_if_match(Req) ->
-    case cowboy_req:header(<<"if-match">>, Req) of
-        undefined ->
+-spec check_etag(undefined | binary()) -> ok | {error, map()}.
+check_etag(undefined) ->
+    ok;
+check_etag(<<>>) ->
+    ok;
+check_etag(<<"*">>) ->
+    ok;
+check_etag(Given) ->
+    Current = etag_value(),
+    case strip_etag(Given) =:= strip_etag(Current) of
+        true ->
             ok;
-        <<"*">> ->
-            ok;
-        Given ->
-            Current = etag_value(),
-            case strip_etag(Given) =:= strip_etag(Current) of
-                true ->
-                    ok;
-                false ->
-                    {error, #{tag => <<"operation-failed">>,
-                              http => 412,
-                              message => <<"etag mismatch">>}}
-            end
+        false ->
+            {error, #{tag => <<"operation-failed">>,
+                      http => 412,
+                      message => <<"etag mismatch">>}}
     end.
+
+check_if_match(Req) ->
+    check_etag(cowboy_req:header(<<"if-match">>, Req)).
 
 strip_etag(B) when is_binary(B) ->
     string:trim(B, both, [$", $\s, $']).
