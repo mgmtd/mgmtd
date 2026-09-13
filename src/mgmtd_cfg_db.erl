@@ -83,17 +83,11 @@ lookup(permanent, Path) ->
 lookup({ets, Ets}, Path) ->
     ets:lookup(Ets, Path).
 
-match_delete(Pattern) ->
-    match_delete(permanent, Pattern).
-
 match_delete(permanent, Pattern) ->
     BackendMod = backend(),
     BackendMod:match_delete(Pattern);
 match_delete({ets, Ets}, Pattern) ->
     to_ok(ets:match_delete(Ets, Pattern)).
-
-match(Pattern) ->
-    match(permanent, Pattern).
 
 %% Transactional match (used inside backend:transaction/1 on commit).
 match(permanent, Pattern) ->

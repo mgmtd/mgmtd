@@ -100,18 +100,11 @@ registered_schemas() ->
 %% access to configuration and enable subscriptions.
 %% The configuration database needs write access to the
 %% directory at DirPath where it stores its files
-load_config_db(DirPath) ->
+load_config_db(_DirPath) ->
     %% Stuff to do here:
     %% 1. read the config
     %% 2. check it against the loaded schema
     ok.
-
-%% @doc Get the item at Path in the tree.
-%% For leaf nodes returns the value of the leaf
-%% For list nodes returns the list keys
-%% For container nodes returns the names of the child nodes
-get_item(Path) ->
-    {ok, value}.
 
 %%--------------------------------------------------------------------
 %% Configuration session transaction API
@@ -389,25 +382,6 @@ lookup_leaf(DbPath, Schema) ->
             end
     end.
 
-
-
-schema_list_to_path(SchemaItems) ->
-    lists:map(fun(#{role := schema, name := Name}) -> Name end, SchemaItems).
-
-schema_list_to_path([#{role := schema} = Last], Acc) ->
-    {Last, lists:reverse(Acc)};
-schema_list_to_path([#{role := schema, name := Name} | Ss], Acc) ->
-    schema_list_to_path(Ss, [Name | Acc]).
-
--spec pp_path(map_path()) -> mgmtd_schema:item_path().
-pp_path(SchemaPath) ->
-    lists:reverse(
-      lists:foldl(
-        fun(#{node_type := list, key_values := KeyValues, name := Name}, Acc) when is_list(KeyValues) ->
-                [list_to_tuple(KeyValues), Name | Acc];
-           (#{name := Name}, Acc) ->
-                [Name | Acc]
-        end, [], SchemaPath)).
 
 
 %% A single command might set multiple parameter values
