@@ -176,7 +176,8 @@ backend() ->
     end.
 
 backend_mod(mnesia) -> mgmtd_cfg_db_mnesia;
-backend_mod(sys_config) -> mgmtd_cfg_db_sys_config.
+backend_mod(sys_config) -> mgmtd_cfg_db_sys_config;
+backend_mod(json) -> mgmtd_cfg_db_json.
 
 to_ok(true) -> ok;
 to_ok(Else) -> Else.

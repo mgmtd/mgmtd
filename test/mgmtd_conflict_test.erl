@@ -9,6 +9,7 @@
 
 -define(M_DIR, "test_db_conflict_mnesia").
 -define(S_DIR, "test_db_conflict_sys").
+-define(J_DIR, "test_db_conflict_json").
 
 %%--------------------------------------------------------------------
 %% Mnesia
@@ -26,6 +27,16 @@ mnesia_test_() ->
       fun both_delete_same_item/0,
       fun conflict_leaves_txn_alive/0,
       fun rollback_after_concurrent_commit_conflicts/0]}.
+
+%%--------------------------------------------------------------------
+%% JSON file
+%%--------------------------------------------------------------------
+json_test_() ->
+    {foreach, fun() -> setup(json, ?J_DIR) end,
+     fun(_) -> teardown(json, ?J_DIR) end,
+     [fun disjoint_edits_both_commit/0,
+      fun same_leaf_second_conflicts/0,
+      fun different_leaves_same_item_merge/0]}.
 
 %%--------------------------------------------------------------------
 %% sys.config

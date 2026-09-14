@@ -1,9 +1,10 @@
 %%%-------------------------------------------------------------------
 %%% @doc Behaviour for a subtree persistence codec.
 %%%
-%%% A codec is a term adapter at one schema node. The sys.config backend
-%%% still walks the tree as proplists; when a node names `{codec, Mod}` in
-%%% `opts`, that node's value is rewritten:
+%%% A codec is a term adapter at one schema node. Only the sys.config
+%%% backend applies it. That backend still walks the tree as proplists;
+%%% when a node names `{codec, Mod}` in `opts`, that node's value is
+%%% rewritten:
 %%%
 %%%   export(DefaultValue) -> WireValue
 %%%   import(WireValue)    -> DefaultValue

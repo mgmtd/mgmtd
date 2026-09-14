@@ -66,6 +66,11 @@ Default prefix is omitted in the CLI. Named prefixes are a path token:
 The sys.config backend uses `{Prefix, Tree}` as the application-name
 grouping (`{default, Tree}` for the silent prefix).
 
+The JSON file backend (`{backend, json}`) writes a nested JSON tree
+to `config.json`. Named prefixes are root objects; the silent prefix's
+children sit at the top level. It does not apply sys.config codecs or
+keep unmatched members.
+
 TODO
 ---
 

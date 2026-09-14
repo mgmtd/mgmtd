@@ -653,6 +653,7 @@ ordered_by(_) ->
 
 %% @doc Persistence codec module named in schema `opts` as `{codec, Mod}`.
 %% Used by the sys.config backend as a term adapter at that node.
+%% The JSON file backend does not apply codecs.
 -spec codec(item_path() | map_node()) -> atom() | undefined.
 codec(#{opts := Opts}) when is_list(Opts) ->
     case lists:keyfind(codec, 1, Opts) of

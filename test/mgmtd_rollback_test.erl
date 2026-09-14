@@ -5,6 +5,7 @@
 
 -define(MNESIA_DIR, "test_db_rollback_mnesia").
 -define(SYS_DIR, "test_db_rollback_sys").
+-define(JSON_DIR, "test_db_rollback_json").
 -define(CAP_DIR, "test_db_rollback_cap").
 -define(OFF_DIR, "test_db_rollback_off").
 -define(ORD_DIR, "test_db_rollback_ordered").
@@ -31,6 +32,16 @@ mnesia_test_() ->
 sys_config_test_() ->
     {foreach, fun() -> setup(sys_config, ?SYS_DIR, 10) end,
      fun(_) -> teardown(sys_config, ?SYS_DIR) end,
+     [fun first_commit_writes_zero/0,
+      fun second_commit_shifts/0,
+      fun restore_previous/0]}.
+
+%%--------------------------------------------------------------------
+%% JSON file
+%%--------------------------------------------------------------------
+json_test_() ->
+    {foreach, fun() -> setup(json, ?JSON_DIR, 10) end,
+     fun(_) -> teardown(json, ?JSON_DIR) end,
      [fun first_commit_writes_zero/0,
       fun second_commit_shifts/0,
       fun restore_previous/0]}.

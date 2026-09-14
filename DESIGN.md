@@ -206,7 +206,13 @@ Database backends
 -----------------
 
 The storage engine is configurable when calling `mgmtd_cfg_db:init/2`.
-Implemented backends: `mnesia` (default) and `sys_config`.
+Implemented backends: `mnesia` (default), `sys_config`, and `json`.
+
+The JSON backend writes a nested JSON tree of the committed config
+(`config.json`): objects for containers, arrays of objects for lists,
+JSON scalars for leaves. Named prefixes are root objects; the silent
+`default` prefix is omitted. It does not apply sys.config `{codec, Mod}`
+rewrites and does not preserve unmatched members.
 
 Storage backends must provide a set of functions to mirror the mnesia API:
 
