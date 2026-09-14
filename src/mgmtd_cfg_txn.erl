@@ -60,6 +60,10 @@ baseline_tree(#cfg_txn{baseline = Baseline}) ->
 %% Ops are recorded newest-first; apply oldest-first so a delete then
 %% re-add of the same list item in one session lands as the re-add.
 %% A rollback-loaded txn (`replace = true`) writes the whole ETS copy.
+%%
+%% Concurrent sessions may edit disjoint paths. If running has moved
+%% under a path this session also changed, commit returns
+%% `{error, {conflict, Path}}` and leaves the txn alive.
 commit(#cfg_txn{replace = true} = Txn) ->
     case will_change(Txn) of
         false ->
@@ -81,13 +85,18 @@ commit(#cfg_txn{ops = Ops} = Txn) ->
     end.
 
 commit_replace(#cfg_txn{ets_copy = Ets} = Txn) ->
-    Rows = ets:tab2list(Ets),
-    case mgmtd_cfg_db:transaction(fun() -> mgmtd_cfg_db:replace_all(Rows) end) of
+    case check_commit_conflict(Txn) of
+        {error, _} = Err ->
+            Err;
         ok ->
-            ok = exit_txn(Txn),
-            {ok, new()};
-        Err ->
-            Err
+            Rows = ets:tab2list(Ets),
+            case mgmtd_cfg_db:transaction(fun() -> mgmtd_cfg_db:replace_all(Rows) end) of
+                ok ->
+                    ok = exit_txn(Txn),
+                    {ok, new()};
+                Err ->
+                    Err
+            end
     end.
 
 -spec will_change(#cfg_txn{}) -> boolean().
@@ -110,32 +119,147 @@ rollback(#cfg_txn{ets_copy = Ets} = Txn, Index) when is_integer(Index), Index >=
     end.
 
 commit_ops(#cfg_txn{} = Txn, Ops) ->
-    Fun = fun() ->
-                  lists:foreach(fun({set, Path, Value}) ->
-                                        mgmtd_cfg_db:insert_path_items(permanent, Path, Value);
-                                   ({delete, Path}) ->
-                                        mgmtd_cfg_db:delete_path_items(permanent, Path);
-                                   ({move, Path, Where}) ->
-                                        case mgmtd_cfg_db:move_item(permanent, Path, Where) of
-                                            {ok, _} ->
-                                                ok;
-                                            {error, Reason} ->
-                                                throw({error, Reason})
-                                        end
-                                end, lists:reverse(Ops))
-          end,
-    case mgmtd_cfg_db:transaction(Fun) of
+    case check_commit_conflict(Txn) of
+        {error, _} = Err ->
+            %% Leave the session alive so the user can discard or retry.
+            Err;
         ok ->
-            %% Other parts of the tree might have changed underneath us, so provide the user with
-            %% a new transaction with a clean ets copy of the latest.
-            %% Nice to have - detect if anything changed in other session(s) and warn the user
-            %% about what was changed.
-            ok = exit_txn(Txn),
-            {ok, new()};
-        Err ->
-            %% The commit failed, leave the existing transaction alive so the user can
-            %% fix the errors
+            Fun = fun() ->
+                          lists:foreach(fun({set, Path, Value}) ->
+                                                mgmtd_cfg_db:insert_path_items(permanent, Path, Value);
+                                           ({delete, Path}) ->
+                                                mgmtd_cfg_db:delete_path_items(permanent, Path);
+                                           ({move, Path, Where}) ->
+                                                case mgmtd_cfg_db:move_item(permanent, Path, Where) of
+                                                    {ok, _} ->
+                                                        ok;
+                                                    {error, Reason} ->
+                                                        throw({error, Reason})
+                                                end
+                                        end, lists:reverse(Ops))
+                  end,
+            case mgmtd_cfg_db:transaction(Fun) of
+                ok ->
+                    ok = exit_txn(Txn),
+                    {ok, new()};
+                Err ->
+                    Err
+            end
+    end.
+
+%% Three-way check: baseline (at txn_new) vs running vs this session.
+%% Disjoint remote edits are allowed. The same path changed to two
+%% different values is a conflict. A full replace also conflicts when
+%% running has moved at all, because it would clobber those commits.
+-spec check_commit_conflict(#cfg_txn{}) -> ok | {error, {conflict, item_path()}}.
+check_commit_conflict(#cfg_txn{baseline = undefined}) ->
+    ok;
+check_commit_conflict(#cfg_txn{ops = [], replace = false}) ->
+    ok;
+check_commit_conflict(#cfg_txn{ets_copy = Copy, baseline = Baseline,
+                               ops = Ops, replace = Replace}) ->
+    CopyMap = rows_to_map(ets:tab2list(Copy)),
+    BaseMap = rows_to_map(ets:tab2list(Baseline)),
+    RunMap = rows_to_map(
+               mgmtd_cfg_db:match_object(
+                 #cfg{_ = mgmtd_schema:ets_pat('_')})),
+    case three_way_conflict(CopyMap, BaseMap, RunMap) of
+        {error, _} = Err ->
+            Err;
+        ok ->
+            case deleted_descendant_conflict(Ops, BaseMap, RunMap) of
+                {error, _} = Err ->
+                    Err;
+                ok when Replace ->
+                    case first_remote_change(BaseMap, RunMap) of
+                        undefined ->
+                            ok;
+                        Path ->
+                            {error, {conflict, Path}}
+                    end;
+                ok ->
+                    ok
+            end
+    end.
+
+rows_to_map(Rows) ->
+    maps:from_list([{P, C} || #cfg{path = P} = C <- Rows]).
+
+row(Map, Path) ->
+    maps:get(Path, Map, none).
+
+three_way_conflict(CopyMap, BaseMap, RunMap) ->
+    Paths = lists:sort(maps:keys(maps:merge(CopyMap, BaseMap))),
+    first_ok(
+      fun(Path) ->
+              Session = row(CopyMap, Path),
+              Base = row(BaseMap, Path),
+              case Session =:= Base of
+                  true ->
+                      ok;
+                  false ->
+                      Running = row(RunMap, Path),
+                      if Running =:= Base -> ok;
+                         Running =:= Session -> ok;
+                         true -> {error, {conflict, Path}}
+                      end
+              end
+      end, Paths).
+
+%% Delete of an ancestor would drop running-only descendants (e.g. a
+%% leaf another session added under the same list item). Use the
+%% session's delete ops, not implicit parent cleanup in the ETS copy.
+deleted_descendant_conflict(Ops, BaseMap, RunMap) ->
+    Deleted = lists:usort(
+                [mgmtd_cfg_db:schema_path_to_key(Path) || {delete, Path} <- Ops]),
+    case Deleted of
+        [] ->
+            ok;
+        _ ->
+            Paths = lists:sort(maps:keys(RunMap)),
+            first_ok(
+              fun(Path) ->
+                      case row(BaseMap, Path) =:= none andalso
+                          under_deleted(Path, Deleted) of
+                          true ->
+                              {error, {conflict, Path}};
+                          false ->
+                              ok
+                      end
+              end, Paths)
+    end.
+
+under_deleted(Path, Deleted) ->
+    lists:any(fun(Prefix) -> lists:prefix(Prefix, Path) end, Deleted).
+
+first_remote_change(BaseMap, RunMap) ->
+    Paths = lists:sort(maps:keys(maps:merge(BaseMap, RunMap))),
+    first_undefined(
+      fun(Path) ->
+              case row(BaseMap, Path) =:= row(RunMap, Path) of
+                  true -> undefined;
+                  false -> Path
+              end
+      end, Paths).
+
+first_ok(_Fun, []) ->
+    ok;
+first_ok(Fun, [P | Ps]) ->
+    case Fun(P) of
+        ok ->
+            first_ok(Fun, Ps);
+        {error, _} = Err ->
             Err
+    end.
+
+first_undefined(_Fun, []) ->
+    undefined;
+first_undefined(Fun, [P | Ps]) ->
+    case Fun(P) of
+        undefined ->
+            first_undefined(Fun, Ps);
+        Path ->
+            Path
     end.
 
 -spec get(#cfg_txn{}, item_path()) -> {ok, any()} | undefined.

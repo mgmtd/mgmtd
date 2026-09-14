@@ -23,6 +23,12 @@
 %%% terms back unchanged, in their original order, and only replaces
 %%% schema-matched keys.
 %%%
+%%% The last on-disk term is kept in `mgmtd_meta` (`sys_config_original`).
+%%% That is committed-file state, not session state: persist runs inside
+%%% a commit, and commits are serialized by `mgmtd_cfg_server`. Each
+%%% persist exports the full `#cfg{}` table, so a later session cannot
+%%% drop an earlier session's schema keys or unmatched sections.
+%%%
 %%% On-disk output is a single Erlang term followed by a period, with
 %%% unlimited print depth, so it is always readable by `file:consult/1`.
 %%% The live file is replaced only after a temp file has been consulted
