@@ -107,7 +107,12 @@ sys_config_test_() ->
       fun compound_key_roundtrip/0,
       fun enum_and_defaults_roundtrip/0,
       fun load_handwritten_sys_config/0,
-      fun show_from_operational_mode/0]}.
+      fun show_from_operational_mode/0,
+      fun unmatched_sections_roundtrip/0,
+      fun unmatched_sections_not_in_mgmtd/0,
+      fun unmatched_only_file_then_commit/0,
+      fun delete_schema_keeps_unmatched/0,
+      fun invalid_schema_value_still_rejected/0]}.
 
 namespace_sys_config_test_() ->
     {setup, fun ns_setup/0, fun ns_teardown/1,
@@ -202,6 +207,94 @@ load_handwritten_sys_config() ->
     ?assertEqual({ok, {10,0,0,1}}, mgmtd:lookup(Item ++ ["host"])),
     ?assertEqual({ok, 9999}, mgmtd:lookup(Item ++ ["port"])).
 
+%% Unknown apps, unknown keys, unmatched list items, and stray top-level
+%% terms stay out of the configuration database and survive a rewrite.
+unmatched_sections_roundtrip() ->
+    Term = unmatched_fixture(),
+    ok = load_file(Term),
+    ?assertEqual({ok, "1GbE"}, mgmtd:lookup(["interface", "speed"])),
+    ?assertEqual({ok, 81}, mgmtd:lookup(["server", "servers", {"web1"}, "port"])),
+    {ok, _} = commit_set(["server", "servers", {"web1"}, "port", "82"]),
+    {ok, [Written]} = file:consult(sys_config_file(?DB_DIR)),
+    ?assertEqual([kernel, default, sasl, stray_atom],
+                 top_level_names(Written)),
+    ?assertEqual(proplists:get_value(kernel, Term),
+                 proplists:get_value(kernel, Written)),
+    ?assertEqual(proplists:get_value(sasl, Term),
+                 proplists:get_value(sasl, Written)),
+    Default = proplists:get_value(default, Written),
+    ?assertEqual({tuple, value}, proplists:get_value(orphan, Default)),
+    Interface = proplists:get_value(interface, Default),
+    ?assertEqual("1GbE", proplists:get_value(speed, Interface)),
+    ?assertEqual(1500, proplists:get_value(mtu, Interface)),
+    Servers = nested([server, servers], Default),
+    %% Unmatched list items keep their original terms and relative
+    %% position around the schema item.
+    ?assertEqual(3, length(Servers)),
+    ?assertEqual(not_a_server, lists:nth(2, Servers)),
+    ?assertEqual([{foo, bar}], lists:nth(3, Servers)),
+    Item = hd(Servers),
+    ?assertEqual("web1", proplists:get_value(name, Item)),
+    ?assertEqual(82, proplists:get_value(port, Item)),
+    ?assertEqual("keep me", proplists:get_value(note, Item)),
+    ok = reopen(?DB_DIR),
+    {ok, [Reloaded]} = file:consult(sys_config_file(?DB_DIR)),
+    ?assertEqual(Written, Reloaded),
+    ?assertEqual({ok, 82}, mgmtd:lookup(["server", "servers", {"web1"}, "port"])).
+
+unmatched_sections_not_in_mgmtd() ->
+    ok = load_file(unmatched_fixture()),
+    ?assertEqual({error, unknown_schema_path}, mgmtd:lookup(["orphan"])),
+    ?assertEqual({error, unknown_schema_path},
+                 mgmtd:lookup(["interface", "mtu"])),
+    ?assertEqual({error, unknown_schema_path}, mgmtd:lookup(["kernel"])),
+    {ok, Show} = mgmtd:txn_show(undefined, []),
+    ?assertEqual(undefined, proplists:get_value("orphan", Show)),
+    ?assertEqual(undefined, proplists:get_value("kernel", Show)),
+    Iface = proplists:get_value("interface", Show),
+    ?assertEqual(undefined, proplists:get_value("mtu", Iface)),
+    Server = proplists:get_value("server", Show),
+    Servers = proplists:get_value("servers", Server),
+    Item = proplists:get_value({"web1"}, Servers),
+    ?assertEqual(undefined, proplists:get_value("note", Item)),
+    {ok, Keys} = mgmtd:lookup(["server", "servers"]),
+    ?assertEqual([{"web1"}], Keys).
+
+unmatched_only_file_then_commit() ->
+    Kernel = {kernel, [{logger_level, warning}]},
+    ok = load_file([Kernel]),
+    {ok, _} = commit_set(["interface", "speed", "1GbE"]),
+    {ok, [Written]} = file:consult(sys_config_file(?DB_DIR)),
+    ?assertEqual([kernel, default], top_level_names(Written)),
+    ?assertEqual(element(2, Kernel), proplists:get_value(kernel, Written)),
+    Default = proplists:get_value(default, Written),
+    Interface = proplists:get_value(interface, Default),
+    ?assertEqual("1GbE", proplists:get_value(speed, Interface)).
+
+delete_schema_keeps_unmatched() ->
+    ok = load_file(unmatched_fixture()),
+    Txn = mgmtd:txn_new(),
+    {ok, _} = txn_delete_commit(Txn, ["server", "servers", {"web1"}]),
+    {ok, [Written]} = file:consult(sys_config_file(?DB_DIR)),
+    ?assertEqual([kernel, default, sasl, stray_atom],
+                 top_level_names(Written)),
+    ?assertEqual(proplists:get_value(kernel, unmatched_fixture()),
+                 proplists:get_value(kernel, Written)),
+    Default = proplists:get_value(default, Written),
+    ?assertEqual({tuple, value}, proplists:get_value(orphan, Default)),
+    Servers = nested([server, servers], Default),
+    ?assertEqual([not_a_server, [{foo, bar}]], Servers),
+    ?assertEqual({ok, []}, mgmtd:lookup(["server", "servers"])).
+
+invalid_schema_value_still_rejected() ->
+    Term = [{default, [{interface, [{speed, "nope"}]}]}],
+    ok = mgmtd_cfg_db:remove_db(?DB_DIR, [{backend, sys_config}]),
+    ok = filelib:ensure_dir(filename:join(?DB_DIR, "sys.config")),
+    ok = file:write_file(sys_config_file(?DB_DIR),
+                         mgmtd_cfg_db_sys_config:format_consult(Term)),
+    ?assertEqual({error, "Unknown enum value"},
+                 mgmtd_cfg_db:init(?DB_DIR, [{backend, sys_config}])).
+
 prefixes_are_application_slots() ->
     {ok, Txn} = commit_set(["server", "servers", {"def1"}, "port", "81"]),
     {ok, _} = txn_set_commit(Txn, ["example", "server", "servers", {"ex1"}, "port", "82"]),
@@ -246,6 +339,38 @@ txn_set_commit(Txn, Path) ->
     {ok, SchemaPath} = mgmtd_schema:lookup_path(Path),
     {ok, Txn2} = mgmtd:txn_set(Txn, SchemaPath),
     mgmtd:txn_commit(Txn2).
+
+txn_delete_commit(Txn, Path) ->
+    {ok, SchemaPath} = mgmtd_schema:lookup_path(Path),
+    {ok, Txn2} = mgmtd:txn_delete(Txn, SchemaPath),
+    mgmtd:txn_commit(Txn2).
+
+unmatched_fixture() ->
+    [{kernel, [{logger_level, info}, {inet_dist_listen_min, 9100}]},
+     {default,
+      [{interface, [{speed, "1GbE"}, {mtu, 1500}]},
+       {server,
+        [{servers,
+          [[{name, "web1"}, {port, 81}, {note, "keep me"}],
+           not_a_server,
+           [{foo, bar}]]}]},
+       {orphan, {tuple, value}}]},
+     {sasl, [{sasl_error_logger, false}]},
+     stray_atom].
+
+load_file(Term) ->
+    ok = mgmtd_cfg_db:remove_db(?DB_DIR, [{backend, sys_config}]),
+    ok = filelib:ensure_dir(filename:join(?DB_DIR, "sys.config")),
+    ok = file:write_file(sys_config_file(?DB_DIR),
+                         mgmtd_cfg_db_sys_config:format_consult(Term)),
+    ?assertEqual({ok, [Term]}, file:consult(sys_config_file(?DB_DIR))),
+    mgmtd_cfg_db:init(?DB_DIR, [{backend, sys_config}]).
+
+top_level_names(Term) ->
+    [case E of {App, _} -> App; Other -> Other end || E <- Term].
+
+nested(Path, Tree) ->
+    lists:foldl(fun(Name, Acc) -> proplists:get_value(Name, Acc) end, Tree, Path).
 
 nested([ListName], Tree, Leaf) ->
     case proplists:get_value(ListName, Tree) of

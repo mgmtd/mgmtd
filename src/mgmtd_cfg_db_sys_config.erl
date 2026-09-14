@@ -18,6 +18,11 @@
 %%% default proplist value is rewritten by `Mod:export/1` / `Mod:import/1`
 %%% (see `mgmtd_codec`). Codecs do not nest.
 %%%
+%%% Sections that do not match a schema node are not imported and are
+%%% not visible to mgmtd operations. A rewrite of the file puts those
+%%% terms back unchanged, in their original order, and only replaces
+%%% schema-matched keys.
+%%%
 %%% On-disk output is a single Erlang term followed by a period, with
 %%% unlimited print depth, so it is always readable by `file:consult/1`.
 %%% The live file is replaced only after a temp file has been consulted
@@ -31,6 +36,7 @@
 -define(TABLE, mgmtd_cfg).
 -define(FILE_NAME, "sys.config").
 -define(META_FILE, sys_config_file).
+-define(ORIGINAL, sys_config_original).
 
 -export([init/2, remove_db/2]).
 
@@ -66,13 +72,21 @@ init(Dir, _Opts) ->
     ets:insert(mgmtd_meta, {?META_FILE, File}),
     case filelib:is_regular(File) of
         false ->
+            remember_original([]),
             persist(Tab, File);
         true ->
             case file:consult(File) of
                 {ok, []} ->
+                    remember_original([]),
                     ok;
                 {ok, [Term]} ->
-                    import_term(Tab, Term);
+                    case import_term(Tab, Term) of
+                        ok ->
+                            remember_original(Term),
+                            ok;
+                        {error, _} = Err ->
+                            Err
+                    end;
                 {ok, Other} ->
                     {error, {invalid_sys_config, Other}};
                 {error, Reason} ->
@@ -84,6 +98,7 @@ init(Dir, _Opts) ->
 remove_db(Dir, _Opts) ->
     delete_table(),
     try ets:delete(mgmtd_meta, ?META_FILE) catch error:badarg -> true end,
+    try ets:delete(mgmtd_meta, ?ORIGINAL) catch error:badarg -> true end,
     _ = file:del_dir_r(Dir),
     ok.
 
@@ -178,6 +193,21 @@ config_file() ->
 config_file(Dir) ->
     filename:join(Dir, ?FILE_NAME).
 
+remember_original(Term) when is_list(Term) ->
+    ets:insert(mgmtd_meta, {?ORIGINAL, Term}),
+    ok;
+remember_original(_) ->
+    ets:insert(mgmtd_meta, {?ORIGINAL, []}),
+    ok.
+
+original_term() ->
+    case ets:lookup(mgmtd_meta, ?ORIGINAL) of
+        [{_, Term}] when is_list(Term) ->
+            Term;
+        _ ->
+            []
+    end.
+
 recreate_table() ->
     delete_table(),
     ets:new(?TABLE, [named_table, public, ordered_set, {keypos, #cfg.path}]).
@@ -211,12 +241,19 @@ restore(Tab, Snapshot) ->
 
 persist(Tab, File) ->
     try cfg_to_term(ets:tab2list(Tab)) of
-        Term ->
+        Exported ->
+            Term = merge_sys_config(original_term(), Exported),
             case consultable(Term) of
                 false ->
                     {error, {not_consultable, Term}};
                 true ->
-                    write_consult_file(File, Term)
+                    case write_consult_file(File, Term) of
+                        ok ->
+                            remember_original(Term),
+                            ok;
+                        {error, _} = Err ->
+                            Err
+                    end
             end
     catch
         throw:{export_error, Reason} ->
@@ -297,6 +334,172 @@ wrap_prefixes(Tree) ->
 named_prefixes() ->
     [P || P <- mgmtd_schema:registered_schemas(), P =/= ?DEFAULT_NS].
 
+%% Overlay schema-owned keys from `Exported` onto the last on-disk term.
+%% Unknown apps, unknown keys, and unmatched list items stay as they were.
+merge_sys_config(Original, Exported) when is_list(Original), is_list(Exported) ->
+    {Parts, Used} =
+        lists:mapfoldl(
+          fun(Entry, Acc) -> merge_top_entry(Entry, Exported, Acc) end,
+          #{},
+          Original),
+    NewApps = [{App, Env} || {App, Env} <- Exported,
+                             is_atom(App),
+                             not maps:is_key(App, Used)],
+    lists:append(Parts) ++ NewApps;
+merge_sys_config(_Original, Exported) ->
+    Exported.
+
+merge_top_entry({App, OrigEnv}, Exported, Used)
+  when is_atom(App), is_list(OrigEnv) ->
+    case is_known_prefix(App) of
+        false ->
+            {[{App, OrigEnv}], Used};
+        true ->
+            ExpEnv =
+                case lists:keyfind(App, 1, Exported) of
+                    {App, Env} when is_list(Env) -> Env;
+                    _ -> []
+                end,
+            MergedEnv = merge_env(prefix_path(App), OrigEnv, ExpEnv),
+            case MergedEnv of
+                [] when OrigEnv =:= [] ->
+                    {[{App, []}], maps:put(App, true, Used)};
+                [] ->
+                    {[], maps:put(App, true, Used)};
+                _ ->
+                    {[{App, MergedEnv}], maps:put(App, true, Used)}
+            end
+    end;
+merge_top_entry(Other, _Exported, Used) ->
+    {[Other], Used}.
+
+merge_env(Path, Orig, Exp) when is_list(Orig), is_list(Exp) ->
+    {Parts, Used} =
+        lists:mapfoldl(
+          fun(Entry, Acc) -> merge_env_entry(Path, Entry, Exp, Acc) end,
+          #{},
+          Orig),
+    New = [{K, V} || {K, V} <- Exp, not maps:is_key(from_key(K), Used)],
+    lists:append(Parts) ++ New;
+merge_env(_Path, _Orig, Exp) ->
+    Exp.
+
+merge_env_entry(Path, {Key, OrigVal}, Exp, Used) ->
+    Name = from_key(Key),
+    case is_list(Name) of
+        false ->
+            {[{Key, OrigVal}], Used};
+        true ->
+            FullPath = Path ++ [Name],
+            case mgmtd_schema:lookup(FullPath) of
+                false ->
+                    {[{Key, OrigVal}], Used};
+                Schema ->
+                    NewUsed = maps:put(Name, true, Used),
+                    case exp_value(Name, Exp) of
+                        {ok, ExpVal} ->
+                            {[{Key, merge_node(FullPath, Schema, OrigVal, ExpVal)}],
+                             NewUsed};
+                        error ->
+                            {keep_leftovers(Key, FullPath, Schema, OrigVal), NewUsed}
+                    end
+            end
+    end;
+merge_env_entry(_Path, Other, _Exp, Used) ->
+    {[Other], Used}.
+
+merge_node(Path, Schema, OrigVal, ExpVal) ->
+    case mgmtd_schema:codec(Schema) of
+        undefined ->
+            case Schema of
+                #{node_type := container} ->
+                    merge_env(Path, as_proplist(OrigVal), as_proplist(ExpVal));
+                #{node_type := list, key_names := KeyNames} ->
+                    merge_list(Path, KeyNames, OrigVal, ExpVal);
+                _ ->
+                    ExpVal
+            end;
+        _Mod ->
+            ExpVal
+    end.
+
+keep_leftovers(Key, Path, Schema, OrigVal) ->
+    case mgmtd_schema:codec(Schema) of
+        undefined ->
+            keep_leftovers1(Key, Path, Schema, OrigVal);
+        _Mod ->
+            []
+    end.
+
+keep_leftovers1(Key, Path, #{node_type := container}, OrigVal) ->
+    keep_if_nonempty(Key, merge_env(Path, as_proplist(OrigVal), []));
+keep_leftovers1(Key, Path, #{node_type := list, key_names := KeyNames}, OrigVal) ->
+    keep_if_nonempty(Key, merge_list(Path, KeyNames, OrigVal, []));
+keep_leftovers1(_Key, _Path, _Schema, _OrigVal) ->
+    [].
+
+keep_if_nonempty(_Key, []) ->
+    [];
+keep_if_nonempty(Key, Merged) ->
+    [{Key, Merged}].
+
+merge_list(ListPath, KeyNames, OrigItems, ExpItems)
+  when is_list(OrigItems), is_list(ExpItems) ->
+    ExpByKey = exp_items_by_key(KeyNames, ExpItems),
+    {Parts, Used} =
+        lists:mapfoldl(
+          fun(Item, Acc) ->
+                  merge_list_item(ListPath, KeyNames, Item, ExpByKey, Acc)
+          end,
+          #{},
+          OrigItems),
+    NewItems =
+        [Item || Item <- ExpItems,
+                 case item_key(KeyNames, Item) of
+                     {ok, K} -> not maps:is_key(K, Used);
+                     error -> true
+                 end],
+    lists:append(Parts) ++ NewItems;
+merge_list(_ListPath, _KeyNames, _OrigItems, ExpItems) ->
+    ExpItems.
+
+merge_list_item(ListPath, KeyNames, Item, ExpByKey, Used) ->
+    case item_key(KeyNames, Item) of
+        {ok, Key} ->
+            case maps:find(Key, ExpByKey) of
+                {ok, ExpProps} ->
+                    OrigProps = item_props(Item),
+                    Merged = merge_env(ListPath ++ [Key], OrigProps, ExpProps),
+                    {[Merged], maps:put(Key, true, Used)};
+                error ->
+                    {[], maps:put(Key, true, Used)}
+            end;
+        error ->
+            {[Item], Used}
+    end.
+
+exp_items_by_key(KeyNames, Items) ->
+    maps:from_list(
+      [{K, item_props(I)}
+       || I <- Items, {ok, K} <- [item_key(KeyNames, I)]]).
+
+exp_value(_Name, []) ->
+    error;
+exp_value(Name, [{K, V} | Rest]) ->
+    case from_key(K) of
+        Name ->
+            {ok, V};
+        _ ->
+            exp_value(Name, Rest)
+    end;
+exp_value(Name, [_ | Rest]) ->
+    exp_value(Name, Rest).
+
+as_proplist(L) when is_list(L) ->
+    L;
+as_proplist(_) ->
+    [].
+
 export_nodes(Nodes) when is_list(Nodes) ->
     lists:keysort(1, [export_node(N) || N <- Nodes]);
 export_nodes(_) ->
@@ -349,7 +552,9 @@ from_key(Name) when is_atom(Name) ->
 from_key(Name) when is_list(Name) ->
     Name;
 from_key(Name) when is_binary(Name) ->
-    unicode:characters_to_list(Name).
+    unicode:characters_to_list(Name);
+from_key(Name) ->
+    Name.
 
 %%--------------------------------------------------------------------
 %% sys.config term -> #cfg{} rows
@@ -373,10 +578,17 @@ import_app(Tab, {Prefix, Env}) when is_atom(Prefix), is_list(Env) ->
         true ->
             import_nodes(Tab, prefix_path(Prefix), Env);
         false ->
-            throw({import_error, {unknown_prefix, Prefix}})
+            ok
     end;
-import_app(_Tab, Other) ->
-    throw({import_error, {invalid_app, Other}}).
+import_app(_Tab, {Prefix, _Other}) when is_atom(Prefix) ->
+    case is_known_prefix(Prefix) of
+        true ->
+            throw({import_error, {invalid_app, Prefix}});
+        false ->
+            ok
+    end;
+import_app(_Tab, _Other) ->
+    ok.
 
 is_known_prefix(?DEFAULT_NS) ->
     true;
@@ -395,19 +607,24 @@ import_nodes(_Tab, Path, Other) ->
 
 import_node(Tab, Path, {Key, Val}) ->
     Name = from_key(Key),
-    FullPath = Path ++ [Name],
-    case mgmtd_schema:lookup(FullPath) of
-        #{node_type := container} = Schema ->
-            import_nodes(Tab, FullPath, maybe_codec_import(Schema, Val));
-        #{node_type := list, key_names := KeyNames} = Schema ->
-            import_list(Tab, FullPath, KeyNames, maybe_codec_import(Schema, Val));
-        #{node_type := Leaf} = Schema when ?is_leaf(Leaf) ->
-            set_leaf(Tab, Path, Name, maybe_codec_import(Schema, Val));
+    case is_list(Name) of
         false ->
-            throw({import_error, {unknown_path, FullPath}})
+            ok;
+        true ->
+            FullPath = Path ++ [Name],
+            case mgmtd_schema:lookup(FullPath) of
+                #{node_type := container} = Schema ->
+                    import_nodes(Tab, FullPath, maybe_codec_import(Schema, Val));
+                #{node_type := list, key_names := KeyNames} = Schema ->
+                    import_list(Tab, FullPath, KeyNames, maybe_codec_import(Schema, Val));
+                #{node_type := Leaf} = Schema when ?is_leaf(Leaf) ->
+                    set_leaf(Tab, Path, Name, maybe_codec_import(Schema, Val));
+                false ->
+                    ok
+            end
     end;
-import_node(_Tab, Path, Other) ->
-    throw({import_error, {invalid_node, Path, Other}}).
+import_node(_Tab, _Path, _Other) ->
+    ok.
 
 import_list(Tab, ListPath, KeyNames, Items) when is_list(Items) ->
     lists:foreach(
@@ -416,19 +633,39 @@ import_list(Tab, ListPath, KeyNames, Items) when is_list(Items) ->
 import_list(_Tab, ListPath, _KeyNames, Other) ->
     throw({import_error, {invalid_list, ListPath, Other}}).
 
-import_list_item(Tab, ListPath, _KeyNames, {Key, Props})
-  when is_tuple(Key), is_list(Props) ->
-    import_list_item_at(Tab, ListPath ++ [Key], Props);
-import_list_item(Tab, ListPath, KeyNames, Props) when is_list(Props) ->
-    Key = key_from_item(KeyNames, Props),
-    import_list_item_at(Tab, ListPath ++ [Key], Props);
-import_list_item(_Tab, ListPath, _KeyNames, Other) ->
-    throw({import_error, {invalid_list_item, ListPath, Other}}).
+import_list_item(Tab, ListPath, KeyNames, Item) ->
+    case item_key(KeyNames, Item) of
+        {ok, Key} ->
+            import_list_item_at(Tab, ListPath ++ [Key], item_props(Item));
+        error ->
+            ok
+    end.
 
-import_list_item_at(_Tab, ItemPath, []) ->
-    throw({import_error, {empty_list_item, ItemPath}});
-import_list_item_at(Tab, ItemPath, Props) ->
-    import_nodes(Tab, ItemPath, Props).
+import_list_item_at(_Tab, _ItemPath, []) ->
+    ok;
+import_list_item_at(Tab, ItemPath, Props) when is_list(Props) ->
+    import_nodes(Tab, ItemPath, Props);
+import_list_item_at(_Tab, _ItemPath, _Other) ->
+    ok.
+
+item_key(_KeyNames, {Key, Props}) when is_tuple(Key), is_list(Props) ->
+    {ok, Key};
+item_key(KeyNames, Props) when is_list(Props) ->
+    try
+        {ok, key_from_item(KeyNames, Props)}
+    catch
+        throw:{import_error, _} ->
+            error
+    end;
+item_key(_KeyNames, _Other) ->
+    error.
+
+item_props({Key, Props}) when is_tuple(Key), is_list(Props) ->
+    Props;
+item_props(Props) when is_list(Props) ->
+    Props;
+item_props(_Other) ->
+    [].
 
 key_from_item(KeyNames, Props) ->
     list_to_tuple([key_token(prop_value(Props, Name)) || Name <- KeyNames]).
