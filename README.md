@@ -1,45 +1,54 @@
 mgmtd
 =====
 
-A self contained system for management of configuration and operational data in an Erlang program
+**mgmtd** is a schema-driven configuration data store and operational data handler for Erlang. It should also work well in Elixir and Gleam systems.
 
-It can be used standalone, or combined with ecli to allow cli menu access
+It can be used standalone, or combined with the ecli library to add a local Juniper style cli
 
-Features (ok, wish list)
-- Configuration and operational data driven by either json schema or Yang
-- Embedded schema driven configuration database
-- Option to provide external database interface
-- Callback based interface to host system to retrieve operational data
-- Subscription interface to recieve configuration changes
-- Transaction based configuration changes - multiple items changed, then commit
-- Override configuration items with environment variables at startup
-- Automatic / programmable schema upgrades
-
-Configuration
+Features
 ===
 
-mgmtd itself can be configured in a number of ways. This config can be provided
-in sys.config, via environment variables, or dynamically.
+- Schema driven configuration database
+- Configuration and operational data driven by json schema, Yang, or Erlang data structures. Schemas can be combined from different sources.
+- Almost full coverage of yang 1.1, including container, list (including user ordered), leaf and leaf-list, leafref, must.
+- Configuration data store in mnesia, json file, or in a sys.config style file.
+- Callback based interface to host erlang system to retrieve operational data
+- Erlang API to subscribe and receive configuration changes from all or part of the config tree
+- Transaction based configuration changes - multiple items can be changed in a single session followed by atomic commit
+- Override configuration items with environment variables at startup ????
+- Startup configuration in an empty system can be supplied in a file. Startup file remains unchanged.
+- Safe concurrent user sessions, with conflicts reported to the last user to commit
+- Transformation phase for sys.config backend to convert pure tree structure to and from differently structured sys.config e.g. for kernel logger config
+- sys.config backend round trips parts of the file that are not covered by any configuration schema
+- Previous configuration store with rollback. Configurable number of rollback copies
+- erlydtl templates to host within an existing cowboy or other based UI
+- RESTCONF API for remote query and update
 
-Available items:
-
-- Configuration database directory
-- Env variable override prefix
-
-
-Components
+Getting Started
 ===
 
+Install from git (hex, and official releases coming)
 
+{deps, [
+        {mgmtd, {git, "https://github.com/mgmtd/mgmtd.git", {branch, "master"}}}
+]}.
 
-mgmtd_schema
-===========
+During your application startup first load your schemas:
 
-Takes both JSON schema and Yang files in any combination and provides
-a common api to query the schema and validate data against the schema.
+```erlang
+mgmtd:load_function_schema(fun() -> example:cfg_schema() end),
+mgmtd:load_json_schema("apps/example/priv/example_schema.json"),
+mgmtd:load_yang_schema("apps/example/priv/example_schema.yang").
+```
 
-The data model is based on Yang. JSON schema is squeezed into Yang
-concepts where there is a conflict.
+Then start the configuration database specifying the directory where the DB should be created, and storage backend (mnesia | json | sys_config):
+
+```erlang
+mgmtd_cfg_db:init("db", [{backend, mnesia}]).
+```
+
+Most of the functionality is used by the example application at https://github.com/mgmtd/example.git. Until more documentation is available this example should get you started.
+
 
 Build
 -----
@@ -49,30 +58,34 @@ Build
 Namespaces
 ----------
 
-Each loaded schema has a **prefix** (an atom). JSON and Erlang schemas
-use `#{namespace => Prefix}` at load time; if omitted the prefix is
-`default`. YANG will also keep a namespace URI; the prefix is still
-the CLI / `sys.config` name.
+Each loaded schema has a **prefix** (an atom). JSON and Erlang schemas use `#{namespace => Prefix}` at load time. If omitted the prefix is `default`. YANG modules have a mandatory prefix which is used.
 
-    mgmtd:load_function_schema(Fun).                       % prefix default
-    mgmtd:load_function_schema(Fun, #{namespace => example}).
-    mgmtd:load_json_schema(File, #{namespace => aeternity}).
-
-Default prefix is omitted in the CLI. Named prefixes are a path token:
+Schemas with the `default` prefix appear at the top level in the CLI. Named prefixes appear as the first path element
 
     set server servers foo port 8080
     set example server servers foo port 8080
 
-The sys.config backend uses `{Prefix, Tree}` as the application-name
-grouping (`{default, Tree}` for the silent prefix).
+The sys.config backend uses `{Prefix, Tree}` as the application name grouping, and (`{default, Tree}` for the default prefix).  
 
-The JSON file backend (`{backend, json}`) writes a nested JSON tree
-to `config.json`. Named prefixes are root objects; the silent prefix's
-children sit at the top level. It does not apply sys.config codecs or
-keep unmatched members.
+The JSON file backend (`{backend, json}`) writes a nested JSON tree to `config.json`. Named prefixes become root objects. The default prefix's children sit at the top level.
 
 TODO
 ---
 
-- [x] Fix completion of existing list keys
-- [x] Finish enum support
+- [ ] AAA. Today there is no authentication for cli or RESTCONF
+- [ ] Some kind of external API so programs outside of the host erlang system can read and subscribe to config
+- [ ] Automatic / programmable database migration during startup after a schema change 
+- [ ] Restriction to prevent new schemas being loaded after startup
+- [ ] Yang rpc and action, hooked into RESTCONF
+- [ ] XML based RESTCONF. Today it's only JSON
+
+Why
+---
+
+This library has been a long time in the making. Having left behind multiple instances of this kind of functionality in closed source companies it felt like it was time to build one for the community.
+
+The first iteration of this library was complete enough to get a sketch down, but never found a user (that I'm aware of). The companion ecli library did find uses in a few projects.
+
+Energy and time were lacking for many years, but a potential use case, and the advent of our handy AI programming buddies solved the time and energy side.
+
+It is my hope that other people find this useful. Feature requests and contributions welcome.
