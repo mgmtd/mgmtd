@@ -13,7 +13,8 @@
    ]},
   {env, [{restconf, [{enabled, false}, {port, 8008}]},
          {rollback, [{count, 10}]},
-         {startup, []}]},
+         {startup, []},
+         {aaa, [{default_role, admin}, {users, []}]}]},
   {modules, []},
 
   {licenses, ["Apache 2.0"]},

@@ -74,7 +74,8 @@ The JSON file backend (`{backend, json}`) writes a nested JSON tree to `config.j
 TODO
 ---
 
-- [ ] AAA. Today there is no authentication for cli or RESTCONF
+- [ ] AAA. CLI maps the Unix-domain peer uid to `admin` / `read_only`
+      (see `mgmtd_aaa`). RESTCONF is still unauthenticated.
 - [ ] Some kind of external API so programs outside of the host erlang system can read and subscribe to config
 - [ ] Automatic / programmable database migration during startup after a schema change 
 - [ ] Restriction to prevent new schemas being loaded after startup

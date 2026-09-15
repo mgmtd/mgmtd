@@ -22,6 +22,8 @@
          rollback_list/0, rollback_show/1, txn_rollback/2, rollback/1]).
 %% Schema API
 -export([schema_children/2, schema_children/3]).
+%% AAA (CLI session roles)
+-export([aaa_role/1, aaa_accesses/1, aaa_permits/2]).
 
 -export([lookup/1, lookup/2]).
 %% Data Callback API towards included configuration database
@@ -93,6 +95,17 @@ load_yang_module(File, Opts) when is_map(Opts) ->
 
 registered_schemas() ->
     mgmtd_schema:registered_schemas().
+
+%% @doc Role for a northbound session identity (`#{uid => _, user => _}`).
+%% `admin' may write; `read_only' may show. See `mgmtd_aaa`.
+aaa_role(Peer) ->
+    mgmtd_aaa:role(Peer).
+
+aaa_accesses(Role) ->
+    mgmtd_aaa:accesses(Role).
+
+aaa_permits(Role, Access) ->
+    mgmtd_aaa:permits(Role, Access).
 
 %% @doc Open the configuration database after schemas are loaded.
 %% Call this early during startup of your system to enable access to
