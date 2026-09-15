@@ -21,7 +21,7 @@ Features
 - Transformation phase for sys.config backend to convert pure tree structure to and from differently structured sys.config e.g. for kernel logger config
 - sys.config backend round trips parts of the file that are not covered by any configuration schema
 - Previous configuration store with rollback. Configurable number of rollback copies
-- erlydtl templates to host within an existing cowboy or other based UI
+- erlydtl templates to provide basic UI. Suitable for hosting within an existing cowboy UI
 - RESTCONF API for remote query and update
 
 Getting Started
