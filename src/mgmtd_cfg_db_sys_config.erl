@@ -48,6 +48,8 @@
 
 -export([copy_to_ets/0]).
 
+-export([load_file/1]).
+
 %% Transaction based operations
 -export([transaction/1,
          read/1,
@@ -69,35 +71,65 @@
 %% API callbacks
 %%--------------------------------------------------------------------
 
--spec init(file:filename(), proplists:proplist()) -> ok | {error, term()}.
+-spec init(file:filename(), proplists:proplist()) ->
+          {ok, new | existing} | {error, term()}.
 init(Dir, _Opts) ->
     File = config_file(Dir),
     ok = filelib:ensure_dir(File),
+    Existed = filelib:is_regular(File),
     Tab = recreate_table(),
     maybe_heir(Tab),
     ets:insert(mgmtd_meta, {?META_FILE, File}),
-    case filelib:is_regular(File) of
-        false ->
-            remember_original([]),
-            persist(Tab, File);
-        true ->
-            case file:consult(File) of
-                {ok, []} ->
-                    remember_original([]),
-                    ok;
-                {ok, [Term]} ->
-                    case import_term(Tab, Term) of
-                        ok ->
-                            remember_original(Term),
-                            ok;
-                        {error, _} = Err ->
-                            Err
-                    end;
-                {ok, Other} ->
-                    {error, {invalid_sys_config, Other}};
-                {error, Reason} ->
-                    {error, {consult, File, Reason}}
-            end
+    Result =
+        case Existed of
+            false ->
+                remember_original([]),
+                persist(Tab, File);
+            true ->
+                case file:consult(File) of
+                    {ok, []} ->
+                        remember_original([]),
+                        ok;
+                    {ok, [Term]} ->
+                        case import_term(Tab, Term) of
+                            ok ->
+                                remember_original(Term),
+                                ok;
+                            {error, _} = ImportErr ->
+                                delete_table(),
+                                ImportErr
+                        end;
+                    {ok, Other} ->
+                        delete_table(),
+                        {error, {invalid_sys_config, Other}};
+                    {error, Reason} ->
+                        delete_table(),
+                        {error, {consult, File, Reason}}
+                end
+        end,
+    case Result of
+        ok ->
+            {ok, case Existed of true -> existing; false -> new end};
+        {error, _} = Err ->
+            Err
+    end.
+
+%% @doc Read a sys.config file into `#cfg{}` rows without opening it as
+%% the live backend. Used as the startup store. Schema must already be
+%% loaded. Unknown apps and unmatched keys are skipped, same as `init/2`.
+-spec load_file(file:filename()) -> {ok, [#cfg{}]} | {error, term()}.
+load_file(File) ->
+    case file:consult(File) of
+        {ok, []} ->
+            {ok, []};
+        {ok, [Term]} ->
+            load_term(Term);
+        {ok, Other} ->
+            {error, {invalid_sys_config, Other}};
+        {error, enoent} ->
+            {error, {startup_file_missing, File}};
+        {error, Reason} ->
+            {error, {consult, File, Reason}}
     end.
 
 -spec remove_db(file:filename(), proplists:proplist()) -> ok.
@@ -565,6 +597,19 @@ from_key(Name) ->
 %%--------------------------------------------------------------------
 %% sys.config term -> #cfg{} rows
 %%--------------------------------------------------------------------
+load_term(Term) when is_list(Term) ->
+    Tab = ets:new(startup_cfg, [public, ordered_set, {keypos, #cfg.path}]),
+    try import_term(Tab, Term) of
+        ok ->
+            {ok, ets:tab2list(Tab)};
+        {error, _} = Err ->
+            Err
+    after
+        ets:delete(Tab)
+    end;
+load_term(Other) ->
+    {error, {invalid_sys_config, Other}}.
+
 import_term(_Tab, []) ->
     ok;
 import_term(Tab, Term) when is_list(Term) ->
@@ -573,7 +618,6 @@ import_term(Tab, Term) when is_list(Term) ->
         ok
     catch
         throw:{import_error, Reason} ->
-            delete_table(),
             {error, Reason}
     end;
 import_term(_Tab, Other) ->

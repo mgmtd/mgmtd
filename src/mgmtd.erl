@@ -94,17 +94,23 @@ load_yang_module(File, Opts) when is_map(Opts) ->
 registered_schemas() ->
     mgmtd_schema:registered_schemas().
 
-%% @doc Load the configuration database.
-%% Call this function after loading the schema(s) early
-%% during startup of your system to enable
-%% access to configuration and enable subscriptions.
-%% The configuration database needs write access to the
-%% directory at DirPath where it stores its files
-load_config_db(_DirPath) ->
-    %% Stuff to do here:
-    %% 1. read the config
-    %% 2. check it against the loaded schema
-    ok.
+%% @doc Open the configuration database after schemas are loaded.
+%% Call this early during startup of your system to enable access to
+%% configuration and subscriptions. The main store needs write access
+%% to `DirPath`.
+%%
+%% Backend and related options come from application env `db`
+%% (default `{backend, mnesia}`). A separately configured **startup
+%% store** is read only when the main store does not yet exist:
+%%
+%%     {startup, [{backend, sys_config}, {file, "config/factory.config"}]}
+%%
+%% After a successful read the main store is created with that
+%% content. Later starts use the main store and ignore the startup
+%% file. `{startup, []}` disables it.
+load_config_db(DirPath) ->
+    Opts = application:get_env(mgmtd, db, []),
+    mgmtd_cfg_db:init(DirPath, Opts).
 
 %%--------------------------------------------------------------------
 %% Configuration session transaction API

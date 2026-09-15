@@ -64,23 +64,32 @@
 %% API callbacks
 %%--------------------------------------------------------------------
 
--spec init(file:filename(), proplists:proplist()) -> ok | {error, term()}.
+-spec init(file:filename(), proplists:proplist()) ->
+          {ok, new | existing} | {error, term()}.
 init(Dir, _Opts) ->
     File = config_file(Dir),
     ok = filelib:ensure_dir(File),
+    Existed = filelib:is_regular(File),
     Tab = recreate_table(),
     maybe_heir(Tab),
     ets:insert(mgmtd_meta, {?META_FILE, File}),
-    case filelib:is_regular(File) of
-        false ->
-            persist(Tab, File);
-        true ->
-            case file:read_file(File) of
-                {ok, Bin} ->
-                    import_bin(Tab, Bin);
-                {error, Reason} ->
-                    {error, {read, File, Reason}}
-            end
+    Result =
+        case Existed of
+            false ->
+                persist(Tab, File);
+            true ->
+                case file:read_file(File) of
+                    {ok, Bin} ->
+                        import_bin(Tab, Bin);
+                    {error, Reason} ->
+                        {error, {read, File, Reason}}
+                end
+        end,
+    case Result of
+        ok ->
+            {ok, case Existed of true -> existing; false -> new end};
+        {error, _} = Err ->
+            Err
     end.
 
 -spec remove_db(file:filename(), proplists:proplist()) -> ok.

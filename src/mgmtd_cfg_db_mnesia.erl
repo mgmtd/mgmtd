@@ -36,20 +36,32 @@
 
 %% @doc initialise the mnesia backend in a standard directory relative
 %% to the working directory of the erlang node ("database")
--spec init(file:filename(), proplists:proplist()) -> ok.
+-spec init(file:filename(), proplists:proplist()) ->
+          {ok, new | existing} | {error, term()}.
 init(Dir, Opts) ->
     Nodes = proplists:get_value(nodes, Opts, [node()]),
     init_db(Dir, Nodes).
 
 %% @doc init mnesia in a directory at Path on Nodes.
--spec init_db(file:filename(), [node()]) -> ok.
+-spec init_db(file:filename(), [node()]) -> {ok, new | existing} | {error, term()}.
 init_db(Path, Nodes) ->
     ok = filelib:ensure_dir(Path),
     ok = application:set_env(mnesia, dir, Path),
     create_schema(Nodes),
-    ok = start_mnesia(),
-    ok = create_table(Nodes),
-    ok = mnesia:wait_for_tables([cfg], 30000).
+    case start_mnesia() of
+        ok ->
+            Created = create_table(Nodes),
+            case mnesia:wait_for_tables([cfg], 30000) of
+                ok ->
+                    {ok, Created};
+                {timeout, _} = Timeout ->
+                    {error, Timeout};
+                {error, _} = WaitErr ->
+                    WaitErr
+            end;
+        {error, _} = StartErr ->
+            StartErr
+    end.
 
 remove_db(DbLocation, Opts) ->
     Nodes = proplists:get_value(nodes, Opts, [node()]),
@@ -136,7 +148,7 @@ create_table(Nodes) ->
                                    {type, ordered_set},
                                    {attributes, record_info(fields, cfg)}]) of
         {atomic, ok} ->
-            ok;
+            new;
         {aborted, {already_exists, _}} ->
-            ok
+            existing
     end.

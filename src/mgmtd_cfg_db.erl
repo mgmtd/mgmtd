@@ -27,17 +27,43 @@
 %%--------------------------------------------------------------------
 
 %% @doc Called once at startup so the chosen database backend can create tables.
+%%
+%% When the main store does not yet exist, a separately configured
+%% startup store (`{startup, [{backend, sys_config}, {file, Path}]}`
+%% in `Opts` or application env `startup`) is read once and written
+%% into the new main store.
 -spec init(file:filename(), proplists:proplist()) -> ok | {error, term()}.
 init(DbLocation, Opts) ->
     Backend = proplists:get_value(backend, Opts, mnesia),
     BackendMod = backend_mod(Backend),
     case BackendMod:init(DbLocation, Opts) of
+        {ok, Created} when Created =:= new; Created =:= existing ->
+            finish_init(DbLocation, Opts, BackendMod, Created);
         ok ->
-            ets:insert(mgmtd_meta, {backend, BackendMod}),
-            true = ets:insert(mgmtd_meta, {db_location, DbLocation}),
-            mgmtd_cfg_rollback:init(DbLocation, rollback_count(Opts));
+            finish_init(DbLocation, Opts, BackendMod, existing);
         {error, _} = Err ->
             Err
+    end.
+
+finish_init(DbLocation, Opts, BackendMod, Created) ->
+    ets:insert(mgmtd_meta, {backend, BackendMod}),
+    true = ets:insert(mgmtd_meta, {db_location, DbLocation}),
+    case mgmtd_cfg_rollback:init(DbLocation, rollback_count(Opts)) of
+        ok ->
+            case mgmtd_cfg_startup:maybe_load(Created, Opts) of
+                ok ->
+                    ok;
+                {error, _} = SeedErr ->
+                    case Created of
+                        new ->
+                            _ = remove_db(DbLocation, Opts);
+                        existing ->
+                            ok
+                    end,
+                    SeedErr
+            end;
+        {error, _} = RollbackErr ->
+            RollbackErr
     end.
 
 remove_db(DbLocation, Opts) ->
