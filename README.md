@@ -29,11 +29,13 @@ Getting Started
 
 Install from git (hex, and official releases coming)
 
+```erlang
 {deps, [
         {mgmtd, {git, "https://github.com/mgmtd/mgmtd.git", {branch, "master"}}}
 ]}.
+```
 
-During your application startup first load your schemas:
+Early in system startup load your schemas:
 
 ```erlang
 mgmtd:load_function_schema(fun() -> example:cfg_schema() end),
@@ -41,13 +43,13 @@ mgmtd:load_json_schema("apps/example/priv/example_schema.json"),
 mgmtd:load_yang_schema("apps/example/priv/example_schema.yang").
 ```
 
-Then start the configuration database specifying the directory where the DB should be created, and storage backend (mnesia | json | sys_config):
+Initialise the configuration database specifying the directory where the DB should be created and the storage backend (mnesia | json | sys_config):
 
 ```erlang
 mgmtd_cfg_db:init("db", [{backend, mnesia}]).
 ```
 
-Most of the functionality is used by the example application at https://github.com/mgmtd/example.git. Until more documentation is available this example should get you started.
+Most of the functionality is used by the example application at https://github.com/mgmtd/example.git. Until more documentation is available the example should get you started.
 
 
 Build
@@ -82,7 +84,7 @@ TODO
 Why
 ---
 
-This library has been a long time in the making. Having left behind multiple instances of this kind of functionality in closed source companies it felt like it was time to build one for the community.
+This library has been a long time in the making. Having left behind multiple instances of this kind of functionality in closed source companies it felt like it was time to build an open source one.
 
 The first iteration of this library was complete enough to get a sketch down, but never found a user (that I'm aware of). The companion ecli library did find uses in a few projects.
 
