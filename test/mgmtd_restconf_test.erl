@@ -25,7 +25,8 @@ listener_test_() ->
       fun operations_is_empty/0,
       fun data_root_has_yang_library/0,
       fun xml_accept_is_not_acceptable/0,
-      fun unknown_path_is_not_found/0]}.
+      fun unknown_path_is_not_found/0,
+      fun yang_schema_resource/0]}.
 
 setup() ->
     Prev = save_env(),
@@ -130,6 +131,48 @@ xml_accept_is_not_acceptable() ->
 unknown_path_is_not_found() ->
     {Code, _, _} = http_get("/"),
     ?assertEqual(404, Code).
+
+yang_schema_resource() ->
+    start_schema(),
+    lists:foreach(fun mgmtd:remove_schema/1, mgmtd:registered_schemas()),
+    ok = mgmtd:load_function_schema(fun mgmtd_test_schema:cfg_schema/0,
+                                    #{namespace => example}),
+    {MsCode, _, MsBody} =
+        http_get("/restconf/data/ietf-yang-library:modules-state"),
+    ?assertEqual(200, MsCode),
+    #{<<"ietf-yang-library:modules-state">> := State} = mgmtd_json:decode(MsBody),
+    Example = hd([M || M <- maps:get(<<"module">>, State),
+                       maps:get(<<"name">>, M) =:= <<"example">>]),
+    SchemaUrl = binary_to_list(maps:get(<<"schema">>, Example)),
+    {Code, Hdrs, Body} = http_get(SchemaUrl),
+    ?assertEqual(200, Code),
+    ?assertEqual("application/yang", proplists:get_value("content-type", Hdrs)),
+    ?assert(binary:match(Body, <<"module example">>) =/= nomatch),
+    {LeafCode, _, LeafBody} =
+        http_get("/restconf/data/ietf-yang-library:modules-state/module=example,/schema"),
+    ?assertEqual(200, LeafCode),
+    #{<<"ietf-yang-library:schema">> := Uri} = mgmtd_json:decode(LeafBody),
+    ?assertEqual(<<"/restconf/yang/example">>, Uri),
+    {InetCode, InetHdrs, InetBody} =
+        http_get("/restconf/yang/ietf-inet-types/2013-07-15"),
+    ?assertEqual(200, InetCode),
+    ?assertEqual("application/yang",
+                 proplists:get_value("content-type", InetHdrs)),
+    ?assert(binary:match(InetBody, <<"module ietf-inet-types">>) =/= nomatch),
+    {HeadCode, HeadHdrs, HeadBody} = http_req(head, SchemaUrl, []),
+    ?assertEqual(200, HeadCode),
+    ?assertEqual(<<>>, HeadBody),
+    ?assertEqual("application/yang",
+                 proplists:get_value("content-type", HeadHdrs)),
+    {Miss, _, _} = http_get("/restconf/yang/no-such-module"),
+    ?assertEqual(404, Miss),
+    lists:foreach(fun mgmtd:remove_schema/1, mgmtd:registered_schemas()).
+
+start_schema() ->
+    case mgmtd_sup:start_link() of
+        {ok, _} -> ok;
+        {error, {already_started, _}} -> ok
+    end.
 
 options_and_head() ->
     {OptCode, OptHdrs, _} = http_req(options, "/restconf/data", []),

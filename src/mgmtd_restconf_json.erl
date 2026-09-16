@@ -38,6 +38,37 @@ encode_ctx(yanglib_id, #{content := Content}) ->
         false ->
             {error, not_found()}
     end;
+encode_ctx({yanglib_module, Name, Rev}, #{content := Content}) ->
+    case include_config(false, Content) of
+        true ->
+            case mgmtd_restconf_yanglib:find_module(Name, yanglib_rev(Rev)) of
+                {ok, M} ->
+                    {ok, #{<<"ietf-yang-library:module">> =>
+                               [mgmtd_restconf_yanglib:module_json(M)]}};
+                error ->
+                    {error, not_found()}
+            end;
+        false ->
+            {error, not_found()}
+    end;
+encode_ctx({yanglib_schema, Name, Rev}, #{content := Content}) ->
+    case include_config(false, Content) of
+        true ->
+            case mgmtd_restconf_yanglib:find_module(Name, yanglib_rev(Rev)) of
+                {ok, M} ->
+                    case mgmtd_yang_export:schema_uri(M) of
+                        undefined ->
+                            {error, not_found()};
+                        Uri ->
+                            {ok, #{<<"ietf-yang-library:schema">> =>
+                                       list_to_binary(Uri)}}
+                    end;
+                error ->
+                    {error, not_found()}
+            end;
+        false ->
+            {error, not_found()}
+    end;
 encode_ctx(#{item_path := Path, schema := Schema, module := Module},
            #{content := Content} = Ctx) ->
     case include_node(Schema, Content) of
@@ -386,6 +417,9 @@ ip_string(T) ->
         Str ->
             Str
     end.
+
+yanglib_rev("") -> any;
+yanglib_rev(Rev) -> Rev.
 
 not_found() ->
     #{tag => <<"invalid-value">>,

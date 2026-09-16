@@ -208,6 +208,10 @@ with_parsed_config(Path, Fun) ->
             not_writable(<<"ietf-yang-library">>);
         {ok, yanglib_id} ->
             not_writable(<<"ietf-yang-library">>);
+        {ok, {yanglib_module, _, _}} ->
+            not_writable(<<"ietf-yang-library">>);
+        {ok, {yanglib_schema, _, _}} ->
+            not_writable(<<"ietf-yang-library">>);
         {ok, #{schema := #{config := false}}} ->
             not_writable(<<"operational data">>);
         {ok, Parsed} ->

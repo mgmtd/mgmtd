@@ -17,7 +17,10 @@
                       prefix := atom(),
                       item_path := item_path(),
                       schema := map()}.
--type parse_ok() :: datastore | yanglib_state | yanglib_id | data_ref().
+-type yanglib_ref() :: {yanglib_module, string(), string()}
+                     | {yanglib_schema, string(), string()}.
+-type parse_ok() :: datastore | yanglib_state | yanglib_id
+                  | yanglib_ref() | data_ref().
 
 -export_type([content/0, data_ref/0, parse_ok/0]).
 
@@ -57,11 +60,8 @@ parse_segments([Seg | Rest], CurMod, Ns, Path) ->
             end
     end.
 
-enter_module("ietf-yang-library", "modules-state", undefined, []) ->
-    {ok, yanglib_state};
-enter_module("ietf-yang-library", "modules-state", undefined,
-             [<<"module-set-id">>]) ->
-    {ok, yanglib_id};
+enter_module("ietf-yang-library", "modules-state", undefined, Rest) ->
+    yanglib_rest(Rest);
 enter_module("ietf-yang-library", _Name, _Keys, _Rest) ->
     {error, #{tag => <<"invalid-value">>,
               http => 404,
@@ -80,6 +80,45 @@ enter_module(Mod, Name, Keys, Rest) ->
             Base = prefix_base(Prefix),
             enter_node(Mod, Prefix, Name, Keys, Rest, Base)
     end.
+
+yanglib_rest([]) ->
+    {ok, yanglib_state};
+yanglib_rest([<<"module-set-id">>]) ->
+    {ok, yanglib_id};
+yanglib_rest([Seg | Rest]) ->
+    case parse_ident(Seg, "ietf-yang-library") of
+        {error, _} = Err ->
+            Err;
+        {_Mod, "module", Keys} when is_list(Keys) ->
+            case module_keys(Keys) of
+                {error, _} = Err ->
+                    Err;
+                {ok, Name, Rev} ->
+                    case Rest of
+                        [] ->
+                            {ok, {yanglib_module, Name, Rev}};
+                        [<<"schema">>] ->
+                            {ok, {yanglib_schema, Name, Rev}};
+                        _ ->
+                            {error, #{tag => <<"invalid-value">>,
+                                      http => 404,
+                                      message => <<"unknown ietf-yang-library node">>}}
+                    end
+            end;
+        _ ->
+            {error, #{tag => <<"invalid-value">>,
+                      http => 404,
+                      message => <<"unknown ietf-yang-library node">>}}
+    end.
+
+module_keys([Name]) ->
+    {ok, Name, ""};
+module_keys([Name, Rev]) ->
+    {ok, Name, Rev};
+module_keys(_) ->
+    {error, #{tag => <<"invalid-value">>,
+              http => 400,
+              message => <<"ietf-yang-library module list key is name,revision">>}}.
 
 enter_node(Mod, Ns, Name, Keys, Rest, Path) ->
     Child = Path ++ [Name],

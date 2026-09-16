@@ -182,12 +182,18 @@ normalize_schema_info(#{prefix := Prefix} = Info) ->
                  M when is_binary(M) ->
                      binary_to_list(M)
              end,
-    #{prefix => Prefix,
-      module => Module,
-      namespace => namespace_uri(Ns),
-      source => maps:get(source, Info, unknown),
-      revision => maps:get(revision, Info, undefined),
-      features => maps:get(features, Info, [])}.
+    Base = #{prefix => Prefix,
+             module => Module,
+             namespace => namespace_uri(Ns),
+             source => maps:get(source, Info, unknown),
+             revision => maps:get(revision, Info, undefined),
+             features => maps:get(features, Info, [])},
+    case maps:get(yang_source, Info, undefined) of
+        undefined ->
+            Base;
+        Src when is_binary(Src) ->
+            Base#{yang_source => Src}
+    end.
 
 unregister_schema(Name) ->
     case schema_infos() of

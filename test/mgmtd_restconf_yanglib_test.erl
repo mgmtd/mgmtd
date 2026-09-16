@@ -14,7 +14,8 @@ identity_test_() ->
       fun yang_module_name_differs_from_prefix/0,
       fun remote_augment_origin_module/0,
       fun restconf_module_override/0,
-      fun modules_state_lists_all_sources/0]}.
+      fun modules_state_lists_all_sources/0,
+      fun modules_state_has_schema_urls/0]}.
 
 setup() ->
     start_mgmtd(),
@@ -105,6 +106,28 @@ modules_state_lists_all_sources() ->
     ?assert(lists:member(<<"draft7">>, JsonNames)),
     ?assertEqual(list_to_binary(mgmtd_restconf_yanglib:module_set_id()),
                  maps:get(<<"module-set-id">>, State)).
+
+modules_state_has_schema_urls() ->
+    lists:foreach(fun mgmtd:remove_schema/1, mgmtd:registered_schemas()),
+    ok = mgmtd:load_function_schema(fun mgmtd_test_schema:cfg_schema/0,
+                                    #{namespace => example}),
+    #{<<"ietf-yang-library:modules-state">> := State} =
+        mgmtd_restconf_yanglib:modules_state(),
+    Mods = maps:get(<<"module">>, State),
+    Example = find_mod(<<"example">>, Mods),
+    ?assertEqual(<<"/restconf/yang/example">>,
+                 maps:get(<<"schema">>, Example)),
+    Inet = find_mod(<<"ietf-inet-types">>, Mods),
+    ?assertEqual(<<"import">>, maps:get(<<"conformance-type">>, Inet)),
+    ?assertEqual(<<"/restconf/yang/ietf-inet-types/2013-07-15">>,
+                 maps:get(<<"schema">>, Inet)),
+    Yanglib = find_mod(<<"ietf-yang-library">>, Mods),
+    ?assertEqual(false, maps:is_key(<<"schema">>, Yanglib)),
+    lists:foreach(fun mgmtd:remove_schema/1, mgmtd:registered_schemas()).
+
+find_mod(Name, Mods) ->
+    [M] = [X || X <- Mods, maps:get(<<"name">>, X) =:= Name],
+    M.
 
 info(Prefix) ->
     [I] = [X || #{prefix := P} = X <- mgmtd_schema:loaded_schema_infos(),

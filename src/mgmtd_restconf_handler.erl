@@ -7,6 +7,7 @@
 -export([init/2]).
 
 -define(JSON, <<"application/yang-data+json">>).
+-define(YANG, <<"application/yang">>).
 -define(XRD, <<"application/xrd+xml">>).
 
 init(Req0, State) ->
@@ -112,13 +113,18 @@ handle(<<"HEAD">>, <<"/restconf/operations">>, Req) ->
 handle(<<"HEAD">>, <<"/restconf/operations/">>, Req) ->
     json_head(Req, fun() -> #{<<"ietf-restconf:operations">> => #{}} end);
 handle(Method, Path, Req) ->
-    case is_data_path(Path) of
+    case is_yang_path(Path) of
         true ->
-            data_method(Method, Path, Req);
-        false when Method =:= <<"GET">> ->
-            not_found(Req);
+            yang_method(Method, Path, Req);
         false ->
-            method_not_allowed(Req)
+            case is_data_path(Path) of
+                true ->
+                    data_method(Method, Path, Req);
+                false when Method =:= <<"GET">> ->
+                    not_found(Req);
+                false ->
+                    method_not_allowed(Req)
+            end
     end.
 
 data_method(Method, Path, Req)
@@ -142,6 +148,45 @@ data_method(_Method, _Path, Req) ->
 is_data_path(<<"/restconf/data">>) -> true;
 is_data_path(<<"/restconf/data/", _/binary>>) -> true;
 is_data_path(_) -> false.
+
+is_yang_path(<<"/restconf/yang/", _/binary>>) -> true;
+is_yang_path(_) -> false.
+
+yang_method(<<"OPTIONS">>, _Path, Req) ->
+    cowboy_req:reply(200, #{<<"allow">> => <<"GET, HEAD, OPTIONS">>}, <<>>, Req);
+yang_method(Method, Path, Req)
+  when Method =:= <<"GET">>; Method =:= <<"HEAD">> ->
+    case yang_module(Path) of
+        {error, not_found} ->
+            not_found(Req);
+        {ok, Name, Rev} ->
+            case mgmtd:export_yang(Name, Rev) of
+                {ok, Body} ->
+                    Hdrs = #{<<"content-type">> => ?YANG,
+                             <<"content-length">> => integer_to_binary(byte_size(Body))},
+                    case Method of
+                        <<"GET">> ->
+                            cowboy_req:reply(200, Hdrs, Body, Req);
+                        <<"HEAD">> ->
+                            cowboy_req:reply(200, Hdrs, <<>>, Req)
+                    end;
+                {error, not_found} ->
+                    not_found(Req)
+            end
+    end;
+yang_method(_Method, _Path, Req) ->
+    cowboy_req:reply(405, #{<<"allow">> => <<"GET, HEAD, OPTIONS">>}, <<>>, Req).
+
+yang_module(<<"/restconf/yang/", Rest/binary>>) ->
+    Parts = [P || P <- binary:split(Rest, <<"/">>, [global]), P =/= <<>>],
+    case Parts of
+        [Name] ->
+            {ok, binary_to_list(Name), undefined};
+        [Name, Rev] ->
+            {ok, binary_to_list(Name), binary_to_list(Rev)};
+        _ ->
+            {error, not_found}
+    end.
 
 host_meta(Req) ->
     Body = <<"<XRD xmlns='http://docs.oasis-open.org/ns/xri/xrd-1.0'>\n",

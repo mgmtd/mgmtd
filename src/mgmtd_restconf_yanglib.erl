@@ -10,7 +10,7 @@
 
 -export([yang_library_revision/0, module_set_id/0, modules/0,
          modules_state/0, api_root/0, yang_library_version/0,
-         find_module/1]).
+         find_module/1, find_module/2, module_json/1]).
 
 -include("mgmtd_schema.hrl").
 
@@ -32,12 +32,15 @@ module_set_id() ->
     <<Hash:128>> = erlang:md5(term_to_binary(lists:usort(Tuples))),
     lists:flatten(io_lib:format("~32.16.0b", [Hash])).
 
-%% Loaded schemas plus the RESTCONF built-in modules.
+%% Loaded schemas plus RESTCONF builtins and RFC 6991 typedef modules.
 -spec modules() -> [map()].
 modules() ->
     Loaded = [schema_to_module(I) || I <- mgmtd_schema:loaded_schema_infos()],
+    Names = [maps:get(name, M) || M <- Loaded],
+    Std = [S || S <- mgmtd_yang_export:stdlib_modules(),
+                not lists:member(maps:get(name, S), Names)],
     [M || {_, M} <- lists:keysort(1, [{maps:get(name, M), M}
-                                      || M <- Loaded ++ builtins()])].
+                                      || M <- Loaded ++ Std ++ builtins()])].
 
 -spec modules_state() -> map().
 modules_state() ->
@@ -58,12 +61,21 @@ yang_library_version() ->
 
 -spec find_module(string()) -> {ok, map()} | error.
 find_module(Name) when is_list(Name) ->
-    case [M || M <- modules(), maps:get(name, M) =:= Name] of
-        [M] ->
+    find_module(Name, any).
+
+-spec find_module(string(), any | string()) -> {ok, map()} | error.
+find_module(Name, Rev) when is_list(Name) ->
+    case [M || M <- modules(),
+               maps:get(name, M) =:= Name,
+               rev_ok(Rev, maps:get(revision, M, ""))] of
+        [M | _] ->
             {ok, M};
-        _ ->
+        [] ->
             error
     end.
+
+rev_ok(any, _) -> true;
+rev_ok(Rev, Stored) -> Rev =:= Stored.
 
 schema_to_module(#{prefix := Prefix, module := Module,
                    namespace := URI, source := Source} = Info) ->
@@ -89,10 +101,20 @@ builtins() ->
        conformance_type => implement}].
 
 module_json(M) ->
-    #{<<"name">> => bin(maps:get(name, M)),
-      <<"revision">> => bin(maps:get(revision, M)),
-      <<"namespace">> => bin(maps:get(namespace, M)),
-      <<"conformance-type">> => <<"implement">>}.
+    Conf = case maps:get(conformance_type, M, implement) of
+               import -> <<"import">>;
+               _ -> <<"implement">>
+           end,
+    Base = #{<<"name">> => bin(maps:get(name, M)),
+             <<"revision">> => bin(maps:get(revision, M)),
+             <<"namespace">> => bin(maps:get(namespace, M)),
+             <<"conformance-type">> => Conf},
+    case mgmtd_yang_export:schema_uri(M) of
+        undefined ->
+            Base;
+        Uri ->
+            Base#{<<"schema">> => bin(Uri)}
+    end.
 
 revision(undefined) ->
     "";

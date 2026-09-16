@@ -11,6 +11,7 @@
          load_json_schema/1, load_json_schema/2,
          load_function_schema/1, load_function_schema/2,
          load_yang_module/1, load_yang_module/2,
+         export_yang/1, export_yang/2,
          remove_schema/0, remove_schema/1,
          registered_schemas/0,
          load_config_db/1]).
@@ -93,6 +94,18 @@ load_yang_module(File) ->
     mgmtd_schema:load_yang_schema_file(File, #{}).
 load_yang_module(File, Opts) when is_map(Opts) ->
     mgmtd_schema:load_yang_schema_file(File, Opts).
+
+%% @doc RFC 8040 schema resource body for a RESTCONF module name.
+%% Original YANG text if the module was loaded from a file; otherwise a
+%% YANG 1.1 encoding of the live schema tree (function / JSON Schema).
+-spec export_yang(string() | binary()) -> {ok, binary()} | {error, not_found}.
+export_yang(Name) ->
+    mgmtd_yang_export:text(Name).
+
+-spec export_yang(string() | binary(), string() | binary() | undefined) ->
+          {ok, binary()} | {error, not_found}.
+export_yang(Name, Revision) ->
+    mgmtd_yang_export:text(Name, Revision).
 
 registered_schemas() ->
     mgmtd_schema:registered_schemas().

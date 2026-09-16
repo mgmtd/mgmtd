@@ -29,7 +29,8 @@
                          namespace := string(),
                          source := schema_source(),
                          revision := undefined | string(),
-                         features := [string()]}.
+                         features := [string()],
+                         yang_source => binary()}.
 
 -define(is_leaf(NodeType), NodeType == leaf orelse NodeType == leaf_list).
 -define(DEFAULT_NS, default).

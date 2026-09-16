@@ -13,7 +13,9 @@
 %% in `users`), `/restconf` requires HTTP Basic. Discovery at
 %% `/.well-known/host-meta` stays open. See `mgmtd_aaa`.
 %%
-%% Schema snapshot for clients is `GET /mgmtd/schema` (not RESTCONF).
+%% Schema snapshot for clients is `GET /mgmtd/schema` (JSON tree, not
+%% RESTCONF). RFC 8040 YANG retrieval is `schema` in yang-library plus
+%% `GET /restconf/yang/<module>[/<revision>]` as `application/yang`.
 %% HTML UI is not served here: hosts mount `mgmtd_ui:cowboy_routes/0`
 %% on their own Cowboy listener.
 %% @end

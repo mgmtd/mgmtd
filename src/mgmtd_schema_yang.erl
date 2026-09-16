@@ -28,7 +28,7 @@ load_file(File) ->
 load_file(File, Opts) when is_map(Opts) ->
     case compile_file(File, Opts) of
         {ok, Compiled} ->
-            load_compiled(Compiled, Opts);
+            load_compiled(Compiled, Opts#{file => File});
         Error ->
             Error
     end.
@@ -181,16 +181,30 @@ load_compiled(Compiled, Opts) ->
                     ok = mgmtd_schema_function:load_resolved(Prefix1, Nodes, Callback)
             end,
             ok = mgmtd_schema:register_schema(
-                   #{prefix => Prefix1,
-                     namespace => Namespace,
-                     source => yang,
-                     module => RestconfMod,
-                     revision => maps:get(revision, Compiled, undefined)}),
+                   schema_info(Prefix1, Namespace, RestconfMod, Compiled, Opts)),
             ok = mgmtd_schema:register_identities(maps:get(identities, Compiled, [])),
             apply_remote_augments(maps:get(remote_augments, Compiled, []),
                                   Callback, maps:get(module, Compiled));
         {error, _} = Err ->
             Err
+    end.
+
+schema_info(Prefix, Namespace, Module, Compiled, Opts) ->
+    Info = #{prefix => Prefix,
+             namespace => Namespace,
+             source => yang,
+             module => Module,
+             revision => maps:get(revision, Compiled, undefined)},
+    case maps:get(file, Opts, undefined) of
+        undefined ->
+            Info;
+        File ->
+            case file:read_file(File) of
+                {ok, Bin} ->
+                    Info#{yang_source => Bin};
+                _ ->
+                    Info
+            end
     end.
 
 module_revision(Body) ->
