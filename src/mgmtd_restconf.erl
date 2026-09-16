@@ -4,9 +4,14 @@
 %% sys.config (`mgmtd`):
 %%
 %%     {restconf, [{enabled, true}, {port, 8008}]}
+%%     {aaa, [{users, [{"alice", admin, "secret"}]}]}
 %%
 %% `enabled` defaults to true. `{restconf, false}` leaves the HTTP
 %% listener off; `{restconf, true}` is the default port.
+%%
+%% When `aaa` has HTTP passwords (`passwords` or `{Name, Role, Password}`
+%% in `users`), `/restconf` requires HTTP Basic. Discovery at
+%% `/.well-known/host-meta` stays open. See `mgmtd_aaa`.
 %%
 %% Schema snapshot for clients is `GET /mgmtd/schema` (not RESTCONF).
 %% HTML UI is not served here: hosts mount `mgmtd_ui:cowboy_routes/0`

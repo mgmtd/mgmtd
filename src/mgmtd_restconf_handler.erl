@@ -10,10 +10,75 @@
 -define(XRD, <<"application/xrd+xml">>).
 
 init(Req0, State) ->
-    Method = cowboy_req:method(Req0),
     Path = cowboy_req:path(Req0),
-    Req = handle(Method, Path, Req0),
-    {ok, Req, State}.
+    {ok, dispatch(Path, Req0), State}.
+
+dispatch(<<"/.well-known/host-meta">>, Req) ->
+    handle(cowboy_req:method(Req), <<"/.well-known/host-meta">>, Req);
+dispatch(Path, Req0) ->
+    case check_auth(Req0) of
+        {ok, Role, Req} ->
+            Method = cowboy_req:method(Req),
+            case mgmtd_aaa:permits(Role, access_for(Method)) of
+                true ->
+                    handle(Method, Path, Req);
+                false ->
+                    forbidden(Req)
+            end;
+        {error, Req} ->
+            Req
+    end.
+
+check_auth(Req) ->
+    case mgmtd_aaa:http_required() of
+        false ->
+            {ok, admin, Req};
+        true ->
+            require_basic(Req)
+    end.
+
+require_basic(Req) ->
+    case parse_authorization(Req) of
+        {basic, User, Pass} ->
+            case mgmtd_aaa:authenticate(User, Pass) of
+                {ok, Role} ->
+                    {ok, Role, Req};
+                error ->
+                    {error, unauthorized(Req)}
+            end;
+        _ ->
+            {error, unauthorized(Req)}
+    end.
+
+parse_authorization(Req) ->
+    try cowboy_req:parse_header(<<"authorization">>, Req) of
+        Auth ->
+            Auth
+    catch
+        _:_ ->
+            malformed
+    end.
+
+access_for(<<"GET">>) -> read;
+access_for(<<"HEAD">>) -> read;
+access_for(<<"OPTIONS">>) -> read;
+access_for(_) -> write.
+
+unauthorized(Req) ->
+    cowboy_req:reply(
+      401,
+      #{<<"www-authenticate">> => <<"Basic realm=\"mgmtd\"">>,
+        <<"content-type">> => ?JSON},
+      mgmtd_restconf_error:encode(
+        #{tag => <<"access-denied">>,
+          message => <<"authentication required">>}),
+      Req).
+
+forbidden(Req) ->
+    mgmtd_restconf_error:reply(
+      Req, 403,
+      #{tag => <<"access-denied">>,
+        message => <<"permission denied">>}).
 
 handle(<<"GET">>, <<"/.well-known/host-meta">>, Req) ->
     host_meta(Req);

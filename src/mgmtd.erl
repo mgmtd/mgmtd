@@ -22,8 +22,9 @@
          rollback_list/0, rollback_show/1, txn_rollback/2, rollback/1]).
 %% Schema API
 -export([schema_children/2, schema_children/3]).
-%% AAA (CLI session roles)
--export([aaa_role/1, aaa_accesses/1, aaa_permits/2]).
+%% AAA (CLI session roles; RESTCONF HTTP Basic)
+-export([aaa_role/1, aaa_accesses/1, aaa_permits/2,
+         aaa_authenticate/2, aaa_http_required/0]).
 
 -export([lookup/1, lookup/2]).
 %% Data Callback API towards included configuration database
@@ -106,6 +107,14 @@ aaa_accesses(Role) ->
 
 aaa_permits(Role, Access) ->
     mgmtd_aaa:permits(Role, Access).
+
+%% @doc HTTP Basic check against `aaa` passwords. `{ok, Role}` or `error`.
+aaa_authenticate(User, Password) ->
+    mgmtd_aaa:authenticate(User, Password).
+
+%% @doc True when RESTCONF should demand HTTP Basic (passwords configured).
+aaa_http_required() ->
+    mgmtd_aaa:http_required().
 
 %% @doc Open the configuration database after schemas are loaded.
 %% Call this early during startup of your system to enable access to
