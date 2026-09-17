@@ -188,7 +188,8 @@ has_password_entry(Entries) ->
               end, Entries).
 
 password_eq(Given, Expected) ->
-    crypto:hash_equals(secret_hash(Given), secret_hash(Expected)).
+    crypto:bytes_to_integer(
+      crypto:exor(secret_hash(Given), secret_hash(Expected))) =:= 0.
 
 secret_hash(Value) ->
     crypto:hash(sha256, to_bin(Value)).

@@ -11,6 +11,7 @@
          load_json_schema/1, load_json_schema/2,
          load_function_schema/1, load_function_schema/2,
          load_yang_module/1, load_yang_module/2,
+         load_yang_module_binary/1, load_yang_module_binary/2,
          export_yang/1, export_yang/2,
          remove_schema/0, remove_schema/1,
          registered_schemas/0,
@@ -94,6 +95,15 @@ load_yang_module(File) ->
     mgmtd_schema:load_yang_schema_file(File, #{}).
 load_yang_module(File, Opts) when is_map(Opts) ->
     mgmtd_schema:load_yang_schema_file(File, Opts).
+
+%% @doc Load a YANG module from its text (RFC 8040 schema retrieval).
+%%
+%% `Opts` is the same as `load_yang_module/2`, plus:
+%%   yang_modules => #{Name => Binary}  %% in-memory imports (string or binary keys)
+load_yang_module_binary(Bin) ->
+    mgmtd_schema:load_yang_schema_binary(Bin, #{}).
+load_yang_module_binary(Bin, Opts) when is_map(Opts) ->
+    mgmtd_schema:load_yang_schema_binary(Bin, Opts).
 
 %% @doc RFC 8040 schema resource body for a RESTCONF module name.
 %% Original YANG text if the module was loaded from a file; otherwise a

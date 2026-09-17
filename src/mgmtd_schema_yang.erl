@@ -4,7 +4,7 @@
 %% instance-identifier), unique, RFC 7950 §10 XPath functions.
 -module(mgmtd_schema_yang).
 
--export([load_file/1, load_file/2]).
+-export([load_file/1, load_file/2, load_binary/1, load_binary/2]).
 -export([compile_file/1, compile_file/2]).
 -export([compile/1, compile/2]).
 
@@ -29,6 +29,25 @@ load_file(File, Opts) when is_map(Opts) ->
     case compile_file(File, Opts) of
         {ok, Compiled} ->
             load_compiled(Compiled, Opts#{file => File});
+        Error ->
+            Error
+    end.
+
+-spec load_binary(binary() | string()) -> ok | {error, term()}.
+load_binary(Bin) ->
+    load_binary(Bin, #{}).
+
+-spec load_binary(binary() | string(), map()) -> ok | {error, term()}.
+load_binary(Bin, Opts) when is_map(Opts) ->
+    Bin1 = iolist_to_binary(Bin),
+    case mgmtd_yang_parse:string(Bin1) of
+        {ok, Stmts} ->
+            case compile(Stmts, Opts) of
+                {ok, Compiled} ->
+                    load_compiled(Compiled, Opts#{yang_source => Bin1});
+                Error ->
+                    Error
+            end;
         Error ->
             Error
     end.
@@ -195,15 +214,20 @@ schema_info(Prefix, Namespace, Module, Compiled, Opts) ->
              source => yang,
              module => Module,
              revision => maps:get(revision, Compiled, undefined)},
-    case maps:get(file, Opts, undefined) of
-        undefined ->
-            Info;
-        File ->
-            case file:read_file(File) of
-                {ok, Bin} ->
-                    Info#{yang_source => Bin};
-                _ ->
-                    Info
+    case maps:get(yang_source, Opts, undefined) of
+        Src when is_binary(Src) ->
+            Info#{yang_source => Src};
+        _ ->
+            case maps:get(file, Opts, undefined) of
+                undefined ->
+                    Info;
+                File ->
+                    case file:read_file(File) of
+                        {ok, Bin} ->
+                            Info#{yang_source => Bin};
+                        _ ->
+                            Info
+                    end
             end
     end.
 
@@ -284,13 +308,13 @@ load_mod(Name, Rev, Kind, Ctx) ->
         {ok, Mod} ->
             {ok, Mod, Ctx};
         error ->
-            case find_yang_file(Name, Rev, Ctx) of
+            case find_yang_source(Name, Rev, Ctx) of
                 {error, _} = Err ->
                     Err;
-                {ok, File} ->
+                {ok, Source} ->
                     CtxL = Ctx#{loaded => maps:put(Key, loading, maps:get(loaded, Ctx)),
-                                file => File},
-                    case mgmtd_yang_parse:file(File, scan_opts(maps:get(opts, Ctx, #{}))) of
+                                file => source_file(Source)},
+                    case parse_yang_source(Source, Ctx) of
                         {error, _} = Err ->
                             Err;
                         {ok, Stmts} ->
@@ -356,6 +380,41 @@ finish_mod(Kind, Name, Body, Header, Key, Ctx) ->
 
 strip_belongs_to(Body) ->
     [S || S <- Body, element(1, S) =/= 'belongs-to'].
+
+find_yang_source(Name, Rev, Ctx) ->
+    case yang_module_lookup(Name, maps:get(opts, Ctx, #{})) of
+        {ok, Bin} ->
+            {ok, {binary, Bin}};
+        error ->
+            case find_yang_file(Name, Rev, Ctx) of
+                {ok, File} ->
+                    {ok, {file, File}};
+                {error, _} = Err ->
+                    Err
+            end
+    end.
+
+parse_yang_source({file, File}, Ctx) ->
+    mgmtd_yang_parse:file(File, scan_opts(maps:get(opts, Ctx, #{})));
+parse_yang_source({binary, Bin}, _Ctx) ->
+    mgmtd_yang_parse:string(Bin).
+
+source_file({file, File}) -> File;
+source_file({binary, _}) -> undefined.
+
+yang_module_lookup(Name, Opts) ->
+    Mods = maps:get(yang_modules, Opts, #{}),
+    case maps:find(Name, Mods) of
+        {ok, Bin} ->
+            {ok, iolist_to_binary(Bin)};
+        error ->
+            case maps:find(unicode:characters_to_binary(Name), Mods) of
+                {ok, Bin} ->
+                    {ok, iolist_to_binary(Bin)};
+                error ->
+                    error
+            end
+    end.
 
 find_yang_file(Name, Rev, Ctx) ->
     Names = yang_filenames(Name, Rev),

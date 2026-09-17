@@ -9,7 +9,9 @@
 -module(mgmtd_schema).
 
 -export([load_json_schema_file/1, load_json_schema_file/2, load_function_schema/2,
-         load_yang_schema_file/1, load_yang_schema_file/2]).
+         load_yang_schema_file/1, load_yang_schema_file/2,
+         load_yang_schema_binary/1, load_yang_schema_binary/2]).
+-export([new_ctx/0, destroy_ctx/1, with_ctx/2, commands_tab/0, meta_tab/0]).
 -export([remove_schema/0, remove_schema/1]).
 -export([prepare_load/3, register_schema/1, register_schema/3,
          unregister_schema/1, registered_schemas/0, loaded_schema_infos/0,
@@ -84,12 +86,61 @@ load_yang_schema_file(File) ->
 load_yang_schema_file(File, Opts) when is_map(Opts) ->
     mgmtd_schema_yang:load_file(File, Opts).
 
+load_yang_schema_binary(Bin) ->
+    mgmtd_schema_yang:load_binary(Bin, #{}).
+
+load_yang_schema_binary(Bin, Opts) when is_map(Opts) ->
+    mgmtd_schema_yang:load_binary(Bin, Opts).
+
+%% Isolated schema world (unnamed ETS). Default (no with_ctx) is the
+%% process-global `mgmtd_commands` / `mgmtd_meta` tables.
+-spec new_ctx() -> #{commands := ets:tid(), meta := ets:tid()}.
+new_ctx() ->
+    #{commands => ets:new(mgmtd_schema_commands, [public, {keypos, #schema.path}]),
+      meta => ets:new(mgmtd_schema_meta, [public])}.
+
+-spec destroy_ctx(#{commands := ets:tid(), meta := ets:tid()}) -> ok.
+destroy_ctx(#{commands := C, meta := M}) ->
+    _ = ets:delete(C),
+    _ = ets:delete(M),
+    ok.
+
+-spec with_ctx(#{commands := ets:tid(), meta := ets:tid()}, fun(() -> A)) -> A.
+with_ctx(#{commands := C, meta := M}, Fun) when is_function(Fun, 0) ->
+    OldC = put('$mgmtd_schema_commands', C),
+    OldM = put('$mgmtd_schema_meta', M),
+    try
+        Fun()
+    after
+        restore_pdict('$mgmtd_schema_commands', OldC),
+        restore_pdict('$mgmtd_schema_meta', OldM)
+    end.
+
+-spec commands_tab() -> ets:tab().
+commands_tab() ->
+    case get('$mgmtd_schema_commands') of
+        undefined -> mgmtd_commands;
+        T -> T
+    end.
+
+-spec meta_tab() -> ets:tab().
+meta_tab() ->
+    case get('$mgmtd_schema_meta') of
+        undefined -> mgmtd_meta;
+        T -> T
+    end.
+
+restore_pdict(Key, undefined) ->
+    erase(Key);
+restore_pdict(Key, Val) ->
+    put(Key, Val).
+
 remove_schema() ->
     remove_schema(?DEFAULT_NS).
 
 remove_schema(Ns) ->
     unregister_schema(Ns),
-    ets:match_delete(mgmtd_commands, #schema{path = ets_pat({'_', Ns}), _ = ets_pat('_')}),
+    ets:match_delete(commands_tab(), #schema{path = ets_pat({'_', Ns}), _ = ets_pat('_')}),
     ok.
 
 %% @doc Validate load options and name-clash rules before inserting nodes.
@@ -132,14 +183,14 @@ register_schema(Info0) when is_map(Info0) ->
     #{prefix := Prefix} = Info,
     case schema_infos() of
         [] ->
-            true = ets:insert(mgmtd_meta, {loaded_schemas, [Info]}),
+            true = ets:insert(meta_tab(), {loaded_schemas, [Info]}),
             ok;
         Current ->
             case [I || #{prefix := P} = I <- Current, P =:= Prefix] of
                 [_|_] ->
                     ok;
                 [] ->
-                    true = ets:insert(mgmtd_meta, {loaded_schemas, [Info | Current]}),
+                    true = ets:insert(meta_tab(), {loaded_schemas, [Info | Current]}),
                     ok
             end
     end.
@@ -201,7 +252,7 @@ unregister_schema(Name) ->
             ok;
         Current ->
             Rest = [I || #{prefix := P} = I <- Current, P =/= Name],
-            true = ets:insert(mgmtd_meta, {loaded_schemas, Rest}),
+            true = ets:insert(meta_tab(), {loaded_schemas, Rest}),
             drop_identities(Name),
             ok
     end.
@@ -210,7 +261,7 @@ register_identities([]) ->
     ok;
 register_identities(List) when is_list(List) ->
     Map1 = lists:foldl(fun add_identity/2, identity_map(), List),
-    true = ets:insert(mgmtd_meta, {yang_identities, Map1}),
+    true = ets:insert(meta_tab(), {yang_identities, Map1}),
     ok.
 
 identities() ->
@@ -264,11 +315,11 @@ derived_from(Id, BaseQN, Map, Seen) ->
     end.
 
 identity_map() ->
-    case ets:info(mgmtd_meta) of
+    case ets:info(meta_tab()) of
         undefined ->
             #{};
         _ ->
-            case ets:lookup(mgmtd_meta, yang_identities) of
+            case ets:lookup(meta_tab(), yang_identities) of
                 [] -> #{};
                 [{_, Map}] -> Map
             end
@@ -277,7 +328,7 @@ identity_map() ->
 drop_identities(Prefix) ->
     PfxBin = atom_to_binary(Prefix, utf8),
     Map = maps:filter(fun(_K, #{prefix := P}) -> P =/= PfxBin end, identity_map()),
-    true = ets:insert(mgmtd_meta, {yang_identities, Map}),
+    true = ets:insert(meta_tab(), {yang_identities, Map}),
     ok.
 
 registered_schemas() ->
@@ -291,7 +342,7 @@ lookup(Path) ->
 -spec lookup(NameSpace :: ns(), Path :: item_path()) -> map() | false.
 lookup(Ns, Path) ->
     SchemaPath = item_path_to_schema_path(Path),
-    case ets:lookup(mgmtd_commands, {SchemaPath, Ns}) of
+    case ets:lookup(commands_tab(), {SchemaPath, Ns}) of
         [#schema{} = Res] ->
             schema_to_map(Res, show);
         [] ->
@@ -327,7 +378,7 @@ children(Ns, Path, move) ->
 children(Ns, Path, CmdType) ->
     SchemaPath = item_path_to_schema_path(cli_path(Ns, Path)),
     ?DBG("Finding children in schema db at path ~p~n", [SchemaPath]),
-    Recs = ets:match_object(mgmtd_commands, #schema{path = {SchemaPath ++ ['_'], Ns}, _ = ets_pat('_')}),
+    Recs = ets:match_object(commands_tab(), #schema{path = {SchemaPath ++ ['_'], Ns}, _ = ets_pat('_')}),
     maybe_add_prefixes(Ns, Path, CmdType,
                        lists:map(fun(R) -> schema_to_map(R, CmdType) end, Recs)).
 
@@ -340,7 +391,7 @@ flagged_children(Ns, Path, CmdType, Flag) ->
                   has_user_ordered_list ->
                       Pat#schema{has_user_ordered_list = true}
               end,
-    Recs = ets:match_object(mgmtd_commands, Pattern),
+    Recs = ets:match_object(commands_tab(), Pattern),
     ?DBG("Found children in schema db at path ~p~n~p~n", [SchemaPath, Recs]),
     maybe_add_prefixes(Ns, Path, CmdType,
                        lists:map(fun(R) -> schema_to_map(R, CmdType) end, Recs)).
@@ -394,11 +445,11 @@ named_prefixes() ->
     [P || #{prefix := P} <- schema_infos(), P =/= ?DEFAULT_NS].
 
 schema_infos() ->
-    case ets:info(mgmtd_meta, name) of
+    case ets:info(meta_tab()) of
         undefined ->
             [];
         _ ->
-            case ets:lookup(mgmtd_meta, loaded_schemas) of
+            case ets:lookup(meta_tab(), loaded_schemas) of
                 [] ->
                     [];
                 [{_, Infos}] ->
@@ -418,7 +469,7 @@ maybe_add_prefixes(_Ns, _Path, _CmdType, Maps) ->
 prefix_child_maps(CmdType, Pred) ->
     lists:filtermap(
       fun(Prefix) ->
-              case ets:lookup(mgmtd_commands, {[atom_to_list(Prefix)], Prefix}) of
+              case ets:lookup(commands_tab(), {[atom_to_list(Prefix)], Prefix}) of
                   [S] ->
                       case Pred(S) of
                           true -> {true, schema_to_map(S, CmdType)};
@@ -444,8 +495,8 @@ mark_has_list_descendent(_Ns, []) ->
     ok;
 mark_has_list_descendent(Ns, Path) ->
     SchPath = lists:reverse(Path),
-    [Node] = ets:lookup(mgmtd_commands, {SchPath, Ns}),
-    ets:insert(mgmtd_commands, Node#schema{has_list = true}),
+    [Node] = ets:lookup(commands_tab(), {SchPath, Ns}),
+    ets:insert(commands_tab(), Node#schema{has_list = true}),
     mark_has_list_descendent(Ns, tl(Path)).
 
 %% Path is the reverse parent path (not including the user-ordered list).
@@ -454,8 +505,8 @@ mark_has_user_ordered_list_descendent(_Ns, []) ->
     ok;
 mark_has_user_ordered_list_descendent(Ns, Path) ->
     SchPath = lists:reverse(Path),
-    [Node] = ets:lookup(mgmtd_commands, {SchPath, Ns}),
-    ets:insert(mgmtd_commands, Node#schema{has_user_ordered_list = true}),
+    [Node] = ets:lookup(commands_tab(), {SchPath, Ns}),
+    ets:insert(commands_tab(), Node#schema{has_user_ordered_list = true}),
     mark_has_user_ordered_list_descendent(Ns, tl(Path)).
 
 identity_from_opts(Opts) ->
@@ -538,7 +589,7 @@ check_name_clash(Prefix, _TopNames) ->
 
 default_top_level_names() ->
     Recs = ets:match_object(
-             mgmtd_commands,
+             commands_tab(),
              #schema{path = {['_'], ?DEFAULT_NS}, _ = ets_pat('_')}),
     [Name || #schema{name = Name} <- Recs].
 

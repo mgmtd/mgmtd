@@ -29,7 +29,7 @@ load_nodes(?DEFAULT_NS, Nodes, IsConfig, Callback) ->
                   end, Nodes);
 load_nodes(Prefix, Nodes, IsConfig, Callback) ->
     Name = atom_to_list(Prefix),
-    case ets:lookup(mgmtd_commands, {[Name], Prefix}) of
+    case ets:lookup(mgmtd_schema:commands_tab(), {[Name], Prefix}) of
         [] ->
             load_node(mgmtd_schema:prefix_container(Prefix, Nodes),
                       [], Prefix, IsConfig, Callback);
@@ -60,7 +60,7 @@ load_node(#container{name = Name, desc = Desc, config = Config0} = Node, Path, N
                 data_callback = Callback,
                 config = Config,
                 opts = Node#container.opts},
-    true = ets:insert_new(mgmtd_commands, Container),
+    true = ets:insert_new(mgmtd_schema:commands_tab(), Container),
     load(Node#container.children, [Name | Path], Ns, Config, Callback);
 load_node(#list{name = Name, desc = Desc, key_names = KeyNames, config = Config0} = Node, Path, Ns, IsConfig, ParentCb) ->
     Config = inherited_config(Config0, IsConfig),
@@ -83,7 +83,7 @@ load_node(#list{name = Name, desc = Desc, key_names = KeyNames, config = Config0
                 config = Config,
                 opts = Node#list.opts},
                                                 % io:format(user, "L - ~p~n", [lists:reverse(Path)]),
-    true = ets:insert_new(mgmtd_commands, LeafList),
+    true = ets:insert_new(mgmtd_schema:commands_tab(), LeafList),
     ok = mgmtd_schema:mark_has_list_descendent(Ns, Path),
     ok = maybe_mark_user_ordered(Node#list.ordered_by, Ns, Path),
     load(Node#list.children, [Name | Path], Ns, Config, Callback);
@@ -104,7 +104,7 @@ load_node(#leaf{name = Name, desc = Desc, type = Type, default = Default, config
                 config = Config,
                 opts = Node#leaf.opts},
                                                 %io:format(user, "L - ~p~n", [lists:reverse(Path)]),
-    true = ets:insert_new(mgmtd_commands, Leaf);
+    true = ets:insert_new(mgmtd_schema:commands_tab(), Leaf);
 load_node(#leaf_list{name = Name, desc = Desc, type = Type, config = Config0} = Node, Path, Ns, IsConfig, ParentCb) ->
     Config = inherited_config(Config0, IsConfig),
     Callback = mgmtd_schema:resolve_data_callback(Node#leaf_list.data_callback, ParentCb, Config),
@@ -123,7 +123,7 @@ load_node(#leaf_list{name = Name, desc = Desc, type = Type, config = Config0} = 
                 mandatory = Node#leaf_list.mandatory,
                 config = Config,
                 opts = Node#leaf_list.opts},
-    true = ets:insert_new(mgmtd_commands, LeafList).
+    true = ets:insert_new(mgmtd_schema:commands_tab(), LeafList).
 
 %% Load records whose `config` flags are already resolved (YANG compiler).
 load_resolved(Prefix, Nodes, Callback) ->
@@ -134,7 +134,7 @@ load_resolved_at(Prefix, ParentPath, Nodes, Callback) ->
     load_resolved_at(Prefix, ParentPath, Nodes, Callback, undefined).
 
 load_resolved_at(Prefix, ParentPath, Nodes, Callback, OriginModule) ->
-    case ets:lookup(mgmtd_commands, {ParentPath, Prefix}) of
+    case ets:lookup(mgmtd_schema:commands_tab(), {ParentPath, Prefix}) of
         [] ->
             {error, {augment_target_missing, ParentPath, Prefix}};
         [_] ->
@@ -151,7 +151,7 @@ load_nodes_resolved(?DEFAULT_NS, Nodes, Callback) ->
                   end, Nodes);
 load_nodes_resolved(Prefix, Nodes, Callback) ->
     Name = atom_to_list(Prefix),
-    case ets:lookup(mgmtd_commands, {[Name], Prefix}) of
+    case ets:lookup(mgmtd_schema:commands_tab(), {[Name], Prefix}) of
         [] ->
             Root = (mgmtd_schema:prefix_container(Prefix, Nodes))#container{config = true},
             load_node_resolved(Root, [], Prefix, Callback, undefined);
@@ -178,7 +178,7 @@ load_node_resolved(#container{name = Name, desc = Desc, config = Config} = Node,
                 data_callback = Callback,
                 config = Config,
                 opts = origin_opts(Node#container.opts, Origin)},
-    true = ets:insert_new(mgmtd_commands, Container),
+    true = ets:insert_new(mgmtd_schema:commands_tab(), Container),
     load_resolved_children(Node#container.children, [Name | Path], Ns, Callback, Origin);
 load_node_resolved(#list{name = Name, desc = Desc, key_names = KeyNames, config = Config} = Node, Path, Ns, ParentCb, Origin) ->
     Callback = mgmtd_schema:resolve_data_callback(Node#list.data_callback, ParentCb, Config),
@@ -199,7 +199,7 @@ load_node_resolved(#list{name = Name, desc = Desc, key_names = KeyNames, config 
                 has_user_ordered_list = Node#list.ordered_by =:= user,
                 config = Config,
                 opts = origin_opts(Node#list.opts, Origin)},
-    true = ets:insert_new(mgmtd_commands, List),
+    true = ets:insert_new(mgmtd_schema:commands_tab(), List),
     ok = mgmtd_schema:mark_has_list_descendent(Ns, Path),
     ok = maybe_mark_user_ordered(Node#list.ordered_by, Ns, Path),
     load_resolved_children(Node#list.children, [Name | Path], Ns, Callback, Origin);
@@ -220,7 +220,7 @@ load_node_resolved(#leaf{name = Name, desc = Desc, type = Type, default = Defaul
                 pattern = Pattern,
                 config = Config,
                 opts = origin_opts(Node#leaf.opts, Origin)},
-    true = ets:insert_new(mgmtd_commands, Leaf);
+    true = ets:insert_new(mgmtd_schema:commands_tab(), Leaf);
 load_node_resolved(#leaf_list{name = Name, desc = Desc, type = Type, config = Config} = Node, Path, Ns, ParentCb, Origin) ->
     Callback = mgmtd_schema:resolve_data_callback(Node#leaf_list.data_callback, ParentCb, Config),
     FullPath = lists:reverse([Name | Path]),
@@ -238,7 +238,7 @@ load_node_resolved(#leaf_list{name = Name, desc = Desc, type = Type, config = Co
                 mandatory = Node#leaf_list.mandatory,
                 config = Config,
                 opts = origin_opts(Node#leaf_list.opts, Origin)},
-    true = ets:insert_new(mgmtd_commands, LeafList).
+    true = ets:insert_new(mgmtd_schema:commands_tab(), LeafList).
 
 origin_opts(Opts, undefined) ->
     Opts;

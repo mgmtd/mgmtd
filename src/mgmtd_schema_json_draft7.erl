@@ -66,7 +66,7 @@ load_json_property(#{<<"type">> := <<"object">>} = Object,
                 mandatory = Mandatory,
                 config = Config},
     %% io:format(user, "O - ~p~n", [lists:reverse(Path)]),
-    true = ets:insert_new(mgmtd_commands, Container),
+    true = ets:insert_new(mgmtd_schema:commands_tab(), Container),
     load_json_properties(maps:get(<<"properties">>, Object, #{}), Path, Ns, Opts,
                          json_required(Object));
 load_json_property(#{<<"type">> := <<"array">>} = Object,
@@ -98,7 +98,7 @@ load_json_property(#{<<"type">> := <<"array">>} = Object,
                         mandatory = false,
                         config = Config
                        },
-            true = ets:insert_new(mgmtd_commands, LeafList);
+            true = ets:insert_new(mgmtd_schema:commands_tab(), LeafList);
         false ->
             %% It's a full list of potentially any subtree
             %% Ideally we need to know which items make up the list key
@@ -114,7 +114,7 @@ load_json_property(#{<<"type">> := <<"array">>} = Object,
                         lists:map(fun(LK) -> binary_to_list(LK) end, ListKeys);
                     _ when Config ->
                         IndexLeaf = generated_index_leaf(Path, Ns, Config),
-                        true = ets:insert_new(mgmtd_commands, IndexLeaf),
+                        true = ets:insert_new(mgmtd_schema:commands_tab(), IndexLeaf),
                         ["index"];
                     _ ->
                         %% Operational data doesn't require list index in Yang
@@ -135,7 +135,7 @@ load_json_property(#{<<"type">> := <<"array">>} = Object,
                         has_list = true,
                         data_callback = Callback,
                         config = Config},
-            true = ets:insert_new(mgmtd_commands, List),
+            true = ets:insert_new(mgmtd_schema:commands_tab(), List),
             ok = mgmtd_schema:mark_has_list_descendent(Ns, tl(Path)),
             Items = maps:get(<<"items">>, Object),
             load_json_properties(maps:get(<<"properties">>, Items, #{}), Path, Ns, Opts,
@@ -158,7 +158,7 @@ load_json_property(#{} = Item, Key, Path, Ns, #{config := Config} = Opts,
                 data_callback = Callback,
                 config = Config},
                                                 %io:format(user, "L - ~p~n", [lists:reverse(Path)]),
-    true = ets:insert_new(mgmtd_commands, Leaf).
+    true = ets:insert_new(mgmtd_schema:commands_tab(), Leaf).
 
 json_required(Object) when is_map(Object) ->
     [binary_to_list(N) || N <- maps:get(<<"required">>, Object, []),
@@ -172,7 +172,7 @@ ensure_prefix_container(Prefix, Opts) ->
     Name = atom_to_list(Prefix),
     Config = maps:get(config, Opts, false),
     Callback = maps:get(callback, Opts, undefined),
-    case ets:lookup(mgmtd_commands, {[Name], Prefix}) of
+    case ets:lookup(mgmtd_schema:commands_tab(), {[Name], Prefix}) of
         [] ->
             mgmtd_schema_function:load_node(
               mgmtd_schema:prefix_container(Prefix, []),
