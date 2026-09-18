@@ -146,7 +146,12 @@ encode_target(Path, #{node_type := leaf_list, name := Name} = Schema, Module, Ct
                 Vals ->
                     {ok, #{qname(Module, Name) => Vals}}
             end
-    end.
+    end;
+encode_target(_Path, #{node_type := Type}, _Module, _Ctx)
+  when Type =:= rpc; Type =:= action; Type =:= notification ->
+    {error, #{tag => <<"operation-not-supported">>,
+              http => 405,
+              message => <<"not a data resource">>}}.
 
 encode_container_body(Path, _Schema, Module, Ctx) ->
     Children = mgmtd_schema:children(Path, show),

@@ -1,0 +1,25 @@
+module example-defaults {
+  namespace "urn:example:defaults";
+  prefix d;
+
+  description
+    "Accessible-tree defaults for when/must.";
+
+  container box {
+    leaf enabled {
+      type boolean;
+      default true;
+    }
+    leaf extra {
+      type string;
+      when "../enabled = 'true'";
+    }
+    leaf gated {
+      type string;
+      must "../enabled = 'true'" {
+        error-message "enabled must be true";
+        error-app-tag "enabled-check";
+      }
+    }
+  }
+}

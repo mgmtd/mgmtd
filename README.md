@@ -80,7 +80,7 @@ TODO
 - [ ] Some kind of external API so programs outside of the host erlang system can read and subscribe to config
 - [ ] Automatic / programmable database migration during startup after a schema change 
 - [ ] Restriction to prevent new schemas being loaded after startup
-- [ ] Yang rpc and action, hooked into RESTCONF
+- [x] Yang rpc and action, hooked into RESTCONF (`mgmtd:rpc/2`, `mgmtd:action/2`, `POST /restconf/operations`, nested action POST)
 - [ ] XML based RESTCONF. Today it's only JSON
 
 Why

@@ -12,6 +12,7 @@
 
 init(Req0, State) ->
     Path = cowboy_req:path(Req0),
+    io:format("RESTCONF ~p ~p~n", [cowboy_req:method(Req0), Path]),
     {ok, dispatch(Path, Req0), State}.
 
 dispatch(<<"/.well-known/host-meta">>, Req) ->
@@ -86,11 +87,21 @@ handle(<<"GET">>, <<"/.well-known/host-meta">>, Req) ->
 handle(<<"HEAD">>, <<"/.well-known/host-meta">>, Req) ->
     cowboy_req:reply(200, #{<<"content-type">> => ?XRD}, <<>>, Req);
 handle(<<"OPTIONS">>, Path, Req) ->
-    case is_data_path(Path) of
+    case is_operations_path(Path) of
         true ->
-            mgmtd_restconf_data:http(<<"OPTIONS">>, Path, Req);
+            mgmtd_restconf_rpc:http_operations(<<"OPTIONS">>, Path, Req);
         false ->
-            cowboy_req:reply(200, #{<<"allow">> => <<"GET, HEAD, OPTIONS">>}, <<>>, Req)
+            case action_ref(Path) of
+                {ok, Parsed} ->
+                    mgmtd_restconf_rpc:http_action(<<"OPTIONS">>, Parsed, Req);
+                false ->
+                    case is_data_path(Path) of
+                        true ->
+                            mgmtd_restconf_data:http(<<"OPTIONS">>, Path, Req);
+                        false ->
+                            cowboy_req:reply(200, #{<<"allow">> => <<"GET, HEAD, OPTIONS">>}, <<>>, Req)
+                    end
+            end
     end;
 handle(<<"GET">>, <<"/restconf">>, Req) ->
     json_get(Req, fun mgmtd_restconf_yanglib:api_root/0);
@@ -104,26 +115,23 @@ handle(<<"GET">>, <<"/restconf/yang-library-version">>, Req) ->
     json_get(Req, fun mgmtd_restconf_yanglib:yang_library_version/0);
 handle(<<"HEAD">>, <<"/restconf/yang-library-version">>, Req) ->
     json_head(Req, fun mgmtd_restconf_yanglib:yang_library_version/0);
-handle(<<"GET">>, <<"/restconf/operations">>, Req) ->
-    json_get(Req, fun() -> #{<<"ietf-restconf:operations">> => #{}} end);
-handle(<<"GET">>, <<"/restconf/operations/">>, Req) ->
-    json_get(Req, fun() -> #{<<"ietf-restconf:operations">> => #{}} end);
-handle(<<"HEAD">>, <<"/restconf/operations">>, Req) ->
-    json_head(Req, fun() -> #{<<"ietf-restconf:operations">> => #{}} end);
-handle(<<"HEAD">>, <<"/restconf/operations/">>, Req) ->
-    json_head(Req, fun() -> #{<<"ietf-restconf:operations">> => #{}} end);
 handle(Method, Path, Req) ->
-    case is_yang_path(Path) of
+    case is_operations_path(Path) of
         true ->
-            yang_method(Method, Path, Req);
+            mgmtd_restconf_rpc:http_operations(Method, Path, Req);
         false ->
-            case is_data_path(Path) of
+            case is_yang_path(Path) of
                 true ->
-                    data_method(Method, Path, Req);
-                false when Method =:= <<"GET">> ->
-                    not_found(Req);
+                    yang_method(Method, Path, Req);
                 false ->
-                    method_not_allowed(Req)
+                    case is_data_path(Path) of
+                        true ->
+                            data_method(Method, Path, Req);
+                        false when Method =:= <<"GET">> ->
+                            not_found(Req);
+                        false ->
+                            method_not_allowed(Req)
+                    end
             end
     end.
 
@@ -136,18 +144,40 @@ data_method(Method, Path, Req)
               #{tag => <<"operation-not-supported">>,
                 message => <<"XML encoding not supported">>});
         json ->
-            mgmtd_restconf_data:http(Method, Path, Req)
+            case action_ref(Path) of
+                {ok, Parsed} ->
+                    mgmtd_restconf_rpc:http_action(Method, Parsed, Req);
+                false ->
+                    mgmtd_restconf_data:http(Method, Path, Req)
+            end
     end;
 data_method(Method, Path, Req)
   when Method =:= <<"PUT">>; Method =:= <<"POST">>;
        Method =:= <<"PATCH">>; Method =:= <<"DELETE">> ->
-    mgmtd_restconf_data:http(Method, Path, Req);
+    case action_ref(Path) of
+        {ok, Parsed} ->
+            mgmtd_restconf_rpc:http_action(Method, Parsed, Req);
+        false ->
+            mgmtd_restconf_data:http(Method, Path, Req)
+    end;
 data_method(_Method, _Path, Req) ->
     method_not_allowed(Req).
+
+action_ref(Path) ->
+    case mgmtd_restconf_path:parse(Path) of
+        {ok, #{schema := #{node_type := action}} = Parsed} ->
+            {ok, Parsed};
+        _ ->
+            false
+    end.
 
 is_data_path(<<"/restconf/data">>) -> true;
 is_data_path(<<"/restconf/data/", _/binary>>) -> true;
 is_data_path(_) -> false.
+
+is_operations_path(<<"/restconf/operations">>) -> true;
+is_operations_path(<<"/restconf/operations/", _/binary>>) -> true;
+is_operations_path(_) -> false.
 
 is_yang_path(<<"/restconf/yang/", _/binary>>) -> true;
 is_yang_path(_) -> false.

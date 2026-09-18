@@ -16,7 +16,8 @@
                             namespace := string(),
                             revision => undefined | string(),
                             yang_version := binary() | atom(),
-                            nodes := [#container{} | #list{} | #leaf{} | #leaf_list{}],
+                            nodes := [#container{} | #list{} | #leaf{} | #leaf_list{}
+                                      | #rpc{} | #action{} | #notification{}],
                             identities => [map()],
                             remote_augments => [map()]}.
 
@@ -488,6 +489,33 @@ data_nodes([{Stmt, Ln, Arg, Sub} | Rest], Ctx, Acc)
         Error ->
             Error
     end;
+data_nodes([{rpc, Ln, Arg, Sub} | Rest], Ctx, Acc) ->
+    case compile_rpc(Ln, Arg, Sub, Ctx) of
+        {ok, Node} ->
+            data_nodes(Rest, Ctx, [Node | Acc]);
+        {skip, _} ->
+            data_nodes(Rest, Ctx, Acc);
+        Error ->
+            Error
+    end;
+data_nodes([{action, Ln, Arg, Sub} | Rest], Ctx, Acc) ->
+    case compile_action(Ln, Arg, Sub, Ctx) of
+        {ok, Node} ->
+            data_nodes(Rest, Ctx, [Node | Acc]);
+        {skip, _} ->
+            data_nodes(Rest, Ctx, Acc);
+        Error ->
+            Error
+    end;
+data_nodes([{notification, Ln, Arg, Sub} | Rest], Ctx, Acc) ->
+    case compile_notification(Ln, Arg, Sub, Ctx) of
+        {ok, Node} ->
+            data_nodes(Rest, Ctx, [Node | Acc]);
+        {skip, _} ->
+            data_nodes(Rest, Ctx, Acc);
+        Error ->
+            Error
+    end;
 data_nodes([_Other | Rest], Ctx, Acc) ->
     data_nodes(Rest, Ctx, Acc).
 
@@ -619,6 +647,80 @@ compile_node_feature('leaf-list', Ln, Arg, Sub, Ctx) ->
                                     opts = node_opts(Sub)}};
                 Error ->
                     prepend_error(Error, Ln, Arg)
+            end
+    end.
+
+%% rpc / action / notification are not datastore nodes (config false).
+compile_rpc(_Ln, Arg, Sub, Ctx) ->
+    case feature_ok(Sub, Ctx) of
+        false ->
+            {skip, if_feature};
+        true ->
+            case compile_io(Sub, Ctx) of
+                {error, _} = Err ->
+                    Err;
+                {ok, Input, Output} ->
+                    {ok, #rpc{name = arg_str(Arg),
+                              desc = find_desc(Sub),
+                              input = fun() -> Input end,
+                              output = fun() -> Output end,
+                              opts = node_opts(Sub)}}
+            end
+    end.
+
+compile_action(_Ln, Arg, Sub, Ctx) ->
+    case feature_ok(Sub, Ctx) of
+        false ->
+            {skip, if_feature};
+        true ->
+            case compile_io(Sub, Ctx) of
+                {error, _} = Err ->
+                    Err;
+                {ok, Input, Output} ->
+                    {ok, #action{name = arg_str(Arg),
+                                 desc = find_desc(Sub),
+                                 input = fun() -> Input end,
+                                 output = fun() -> Output end,
+                                 opts = node_opts(Sub)}}
+            end
+    end.
+
+compile_notification(_Ln, Arg, Sub, Ctx) ->
+    case feature_ok(Sub, Ctx) of
+        false ->
+            {skip, if_feature};
+        true ->
+            ChildCtx = Ctx#{parent_config => false},
+            case data_nodes(Sub, ChildCtx) of
+                {error, _} = Err ->
+                    Err;
+                {ok, Children} ->
+                    {ok, #notification{name = arg_str(Arg),
+                                       desc = find_desc(Sub),
+                                       children = fun() -> Children end,
+                                       opts = node_opts(Sub)}}
+            end
+    end.
+
+compile_io(Sub, Ctx) ->
+    ChildCtx = Ctx#{parent_config => false},
+    InputSub = case lists:keyfind(input, 1, Sub) of
+                   {input, _, _, IS} -> IS;
+                   false -> []
+               end,
+    OutputSub = case lists:keyfind(output, 1, Sub) of
+                    {output, _, _, OS} -> OS;
+                    false -> []
+                end,
+    case data_nodes(InputSub, ChildCtx) of
+        {error, _} = Err ->
+            Err;
+        {ok, Input} ->
+            case data_nodes(OutputSub, ChildCtx) of
+                {error, _} = Err ->
+                    Err;
+                {ok, Output} ->
+                    {ok, Input, Output}
             end
     end.
 
@@ -769,7 +871,10 @@ propagate_uses_opts(Nodes, UsesSub) ->
 add_opts(#container{opts = O} = N, Extra) -> N#container{opts = Extra ++ O};
 add_opts(#list{opts = O} = N, Extra) -> N#list{opts = Extra ++ O};
 add_opts(#leaf{opts = O} = N, Extra) -> N#leaf{opts = Extra ++ O};
-add_opts(#leaf_list{opts = O} = N, Extra) -> N#leaf_list{opts = Extra ++ O}.
+add_opts(#leaf_list{opts = O} = N, Extra) -> N#leaf_list{opts = Extra ++ O};
+add_opts(#rpc{opts = O} = N, Extra) -> N#rpc{opts = Extra ++ O};
+add_opts(#action{opts = O} = N, Extra) -> N#action{opts = Extra ++ O};
+add_opts(#notification{opts = O} = N, Extra) -> N#notification{opts = Extra ++ O}.
 
 %%--------------------------------------------------------------------
 %% choice / case (flatten)
@@ -1554,7 +1659,8 @@ ordered_by_of(Sub) ->
 
 must_opts(Sub) ->
     [{must, #{expr => arg_str(Arg),
-              error_message => find_str('error-message', MustSub)}}
+              error_message => find_str('error-message', MustSub),
+              error_app_tag => find_str('error-app-tag', MustSub)}}
      || {must, _, Arg, MustSub} <- Sub].
 
 when_opt(Sub) ->
@@ -1642,4 +1748,7 @@ prefix_atom(L) when is_list(L) -> list_to_atom(L).
 node_name(#container{name = N}) -> N;
 node_name(#list{name = N}) -> N;
 node_name(#leaf{name = N}) -> N;
-node_name(#leaf_list{name = N}) -> N.
+node_name(#leaf_list{name = N}) -> N;
+node_name(#rpc{name = N}) -> N;
+node_name(#action{name = N}) -> N;
+node_name(#notification{name = N}) -> N.

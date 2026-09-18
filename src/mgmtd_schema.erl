@@ -22,6 +22,7 @@
 -export([lookup/1, lookup/2, get_default/1, get_default/2]).
 -export([lookup_path/1]).
 -export([children/1, children/2, children/3]).
+-export([rpcs/0, is_operation_node/1]).
 -export([split_item_path/1, cli_path/2]).
 -export([cast_value/2, cast_list_key_values/1, cast/2]).
 -export([codec/1, data_callback/1, resolve_data_callback/3, ordered_by/1]).
@@ -380,7 +381,45 @@ children(Ns, Path, CmdType) ->
     ?DBG("Finding children in schema db at path ~p~n", [SchemaPath]),
     Recs = ets:match_object(commands_tab(), #schema{path = {SchemaPath ++ ['_'], Ns}, _ = ets_pat('_')}),
     maybe_add_prefixes(Ns, Path, CmdType,
-                       lists:map(fun(R) -> schema_to_map(R, CmdType) end, Recs)).
+                       filter_cmd_children(
+                         CmdType,
+                         lists:map(fun(R) -> schema_to_map(R, CmdType) end, Recs))).
+
+%% @doc Top-level YANG / function-schema RPCs (not nested actions).
+-spec rpcs() -> [map_node()].
+rpcs() ->
+    case ets:info(commands_tab()) of
+        undefined ->
+            [];
+        _ ->
+            Pat = #schema{node_type = rpc, _ = ets_pat('_')},
+            [schema_to_map(S, operations)
+             || S <- ets:match_object(commands_tab(), Pat),
+                is_top_level_rpc(S)]
+    end.
+
+-spec is_operation_node(node_type() | map_node()) -> boolean().
+is_operation_node(#{node_type := Type}) ->
+    is_operation_node(Type);
+is_operation_node(rpc) -> true;
+is_operation_node(action) -> true;
+is_operation_node(notification) -> true;
+is_operation_node(_) -> false.
+
+filter_cmd_children(schema, Maps) ->
+    Maps;
+filter_cmd_children(operations, Maps) ->
+    [M || M <- Maps, maps:get(node_type, M) =:= rpc];
+filter_cmd_children(_CmdType, Maps) ->
+    [M || M <- Maps, not is_operation_node(maps:get(node_type, M))].
+
+is_top_level_rpc(#schema{path = {Path, Prefix}}) ->
+    case Prefix of
+        ?DEFAULT_NS ->
+            length(Path) =:= 1;
+        _ ->
+            length(Path) =:= 2 andalso hd(Path) =:= atom_to_list(Prefix)
+    end.
 
 flagged_children(Ns, Path, CmdType, Flag) ->
     SchemaPath = item_path_to_schema_path(cli_path(Ns, Path)),
@@ -394,7 +433,9 @@ flagged_children(Ns, Path, CmdType, Flag) ->
     Recs = ets:match_object(commands_tab(), Pattern),
     ?DBG("Found children in schema db at path ~p~n~p~n", [SchemaPath, Recs]),
     maybe_add_prefixes(Ns, Path, CmdType,
-                       lists:map(fun(R) -> schema_to_map(R, CmdType) end, Recs)).
+                       filter_cmd_children(
+                         CmdType,
+                         lists:map(fun(R) -> schema_to_map(R, CmdType) end, Recs))).
 
 -spec item_path_to_schema_path(item_path()) -> schema_path().
 item_path_to_schema_path([]) ->

@@ -1,0 +1,69 @@
+module example-rpc {
+  namespace "urn:example:rpc";
+  prefix rpc;
+
+  description
+    "RPCs, a nested action, and a notification for mgmtd tests.";
+
+  rpc restart {
+    description "Restart with no input or output.";
+  }
+
+  rpc echo {
+    description "Echo a string.";
+    input {
+      leaf in {
+        type string;
+      }
+    }
+    output {
+      leaf out {
+        type string;
+      }
+    }
+  }
+
+  rpc add {
+    description "Add two integers.";
+    input {
+      leaf a {
+        type int32;
+        mandatory true;
+      }
+      leaf b {
+        type int32;
+        mandatory true;
+      }
+    }
+    output {
+      leaf sum {
+        type int32;
+      }
+    }
+  }
+
+  container box {
+    description "Action target.";
+    list items {
+      key "name";
+      leaf name {
+        type string;
+      }
+      action reset {
+        description "Reset one item.";
+        output {
+          leaf state {
+            type string;
+          }
+        }
+      }
+    }
+  }
+
+  notification went-down {
+    description "Compiled only; not streamed.";
+    leaf if-name {
+      type string;
+    }
+  }
+}

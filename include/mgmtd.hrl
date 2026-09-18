@@ -103,3 +103,37 @@
         undefined :: undefined | boolean(),
         opts = [] :: list()
     }).
+
+%% Top-level YANG rpc, or the same shape from a function schema.
+%% `input` / `output` are thunks of data nodes (not the implicit
+%% containers). `callback` is a `mgmtd_rpc` module; if undefined the
+%% schema load-option `callback` is used.
+-record(rpc,
+    {
+        name :: string(),
+        desc = "" :: string(),
+        callback :: atom(),
+        input = fun() -> [] end :: fun(() -> list()),
+        output = fun() -> [] end :: fun(() -> list()),
+        opts = [] :: list()
+    }).
+
+%% Nested YANG action (container / list child). Same payload shape as rpc.
+-record(action,
+    {
+        name :: string(),
+        desc = "" :: string(),
+        callback :: atom(),
+        input = fun() -> [] end :: fun(() -> list()),
+        output = fun() -> [] end :: fun(() -> list()),
+        opts = [] :: list()
+    }).
+
+%% YANG notification. Compiled into the schema; not delivered (no streams).
+-record(notification,
+    {
+        name :: string(),
+        desc = "" :: string(),
+        children = fun() -> [] end :: fun(() -> list()),
+        opts = [] :: list()
+    }).

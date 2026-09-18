@@ -29,6 +29,7 @@
          aaa_authenticate/2, aaa_http_required/0]).
 
 -export([lookup/1, lookup/2]).
+-export([rpc/2, action/2]).
 %% Data Callback API towards included configuration database
 -export([list_keys/3, get_value/2]).
 
@@ -356,6 +357,21 @@ schema_children(Ns, Path, CmdType) ->
 %% `data_callback` module (`mgmtd_provider:get_value/1`).
 %% A list path returns the list keys; a container or a full path to a
 %% list item returns the names of the child nodes.
+
+%% @doc Invoke a top-level YANG rpc. `Input` is a map of child names
+%% to already-JSON-shaped or Erlang values; they are cast against the
+%% rpc `input` schema. `{ok, empty}` means no output.
+-spec rpc(item_path(), map()) ->
+          {ok, map()} | {ok, empty} | {error, map()}.
+rpc(Path, Input) ->
+    mgmtd_rpc:invoke(Path, Input).
+
+%% @doc Invoke a nested YANG action. `Path` includes the data instance
+%% and the action name (list keys as tuples).
+-spec action(item_path(), map()) ->
+          {ok, map()} | {ok, empty} | {error, map()}.
+action(Path, Input) ->
+    mgmtd_rpc:invoke(Path, Input).
 
 -spec lookup(item_path()) -> {ok, any()} | {error, term()}.
 lookup(Path) ->

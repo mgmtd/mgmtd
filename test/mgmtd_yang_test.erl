@@ -795,6 +795,74 @@ commit_paths(Paths) ->
             end, mgmtd:txn_new(), Paths),
     mgmtd:txn_commit(Txn).
 
+compile_rpc_action_notification_test() ->
+    {ok, #{nodes := Nodes}} =
+        mgmtd_schema_yang:compile_file("test/yang/example-rpc.yang"),
+    Names = [name(N) || N <- Nodes],
+    ?assertEqual(["restart", "echo", "add", "box", "went-down"], Names),
+    #rpc{name = "echo", input = In, output = Out} =
+        lists:keyfind("echo", #rpc.name, Nodes),
+    ?assertEqual(["in"], [N || #leaf{name = N} <- In()]),
+    ?assertEqual(["out"], [N || #leaf{name = N} <- Out()]),
+    #rpc{name = "restart", input = Rin, output = Rout} =
+        lists:keyfind("restart", #rpc.name, Nodes),
+    ?assertEqual([], Rin()),
+    ?assertEqual([], Rout()),
+    #container{name = "box", children = Box} =
+        lists:keyfind("box", #container.name, Nodes),
+    #list{name = "items", children = Items} =
+        lists:keyfind("items", #list.name, Box()),
+    #action{name = "reset"} =
+        lists:keyfind("reset", #action.name, Items()),
+    #notification{name = "went-down"} =
+        lists:keyfind("went-down", #notification.name, Nodes).
+
+rpc_hidden_from_data_children_test() ->
+    start_mgmtd(),
+    lists:foreach(fun mgmtd:remove_schema/1, mgmtd:registered_schemas()),
+    ok = mgmtd:load_yang_module("test/yang/example-rpc.yang",
+                                #{callback => mgmtd_test_rpc}),
+    try
+        Show = [maps:get(name, C) || C <- mgmtd:schema_children(["rpc"], show)],
+        ?assertEqual(["box"], Show),
+        Schema = [maps:get(name, C)
+                  || C <- mgmtd_schema:children(["rpc"], schema)],
+        ?assert(lists:member("echo", Schema)),
+        ?assert(lists:member("restart", Schema)),
+        ?assert(lists:member("went-down", Schema)),
+        RpcNames = [maps:get(name, R) || R <- mgmtd_schema:rpcs()],
+        ?assertEqual(["add", "echo", "restart"], lists:sort(RpcNames)),
+        #{node_type := rpc, data_callback := mgmtd_test_rpc} =
+            mgmtd_schema:lookup(["rpc", "echo"]),
+        #{node_type := action} =
+            mgmtd_schema:lookup(["rpc", "box", "items", "reset"])
+    after
+        mgmtd:remove_schema(rpc)
+    end.
+
+default_in_accessible_tree_test() ->
+    start_mgmtd(),
+    lists:foreach(fun mgmtd:remove_schema/1, mgmtd:registered_schemas()),
+    Db = "test_db_yang_defaults",
+    ok = mgmtd_cfg_db:remove_db(Db, [{backend, mnesia}]),
+    ok = mgmtd:load_yang_module("test/yang/example-defaults.yang"),
+    ok = mgmtd_cfg_db:init(Db, [{backend, mnesia}]),
+    try
+        {ok, Pe} = mgmtd_schema:lookup_path(["d", "box", "extra", "ok"]),
+        {ok, _} = mgmtd:txn_commit(element(2, mgmtd:txn_set(mgmtd:txn_new(), Pe))),
+        {ok, Pg} = mgmtd_schema:lookup_path(["d", "box", "gated", "x"]),
+        {ok, _} = mgmtd:txn_commit(element(2, mgmtd:txn_set(mgmtd:txn_new(), Pg))),
+        {ok, Pf} = mgmtd_schema:lookup_path(["d", "box", "enabled", "false"]),
+        {ok, Pe2} = mgmtd_schema:lookup_path(["d", "box", "extra", "nope"]),
+        Txn = element(2, mgmtd:txn_set(mgmtd:txn_new(), Pf)),
+        Txn2 = element(2, mgmtd:txn_set(Txn, Pe2)),
+        {error, {when_failed, ["d", "box", "extra"], "../enabled = 'true'"}} =
+            mgmtd:txn_commit(Txn2)
+    after
+        mgmtd:remove_schema(d),
+        mgmtd_cfg_db:remove_db(Db, [{backend, mnesia}])
+    end.
+
 must_and_when_stored_on_opts_test() ->
     Yang = <<"
         module m {
@@ -831,7 +899,10 @@ stmt_arg(Key, Body) ->
 name(#container{name = N}) -> N;
 name(#list{name = N}) -> N;
 name(#leaf{name = N}) -> N;
-name(#leaf_list{name = N}) -> N.
+name(#leaf_list{name = N}) -> N;
+name(#rpc{name = N}) -> N;
+name(#action{name = N}) -> N;
+name(#notification{name = N}) -> N.
 
 root_children(Nodes) ->
     #container{children = Ch} = lists:keyfind("root", #container.name, Nodes),

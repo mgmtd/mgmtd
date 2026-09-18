@@ -264,7 +264,7 @@ data_body(Prefix, Module, Acc) ->
 own_children(Prefix, Path, Module) ->
     Named = [atom_to_list(P) || #{prefix := P} <- mgmtd_schema:loaded_schema_infos(),
                                 P =/= ?DEFAULT_NS],
-    [C || C <- mgmtd_schema:children(Path, show),
+    [C || C <- mgmtd_schema:children(Path, schema),
           maps:get(node_type, C) =/= list_key,
           not foreign_origin(C, Module),
           not (Prefix =:= ?DEFAULT_NS
@@ -366,8 +366,44 @@ emit_node(#{node_type := leaf_list} = N, _Prefix, _Module, Ind, Acc) ->
     Extra = list_extras(N, Ind + 1),
     {block(Ind, "leaf-list", maps:get(name, N),
            node_body(N, Ind + 1) ++ TypeTxt ++ Extra), Acc1};
+emit_node(#{node_type := rpc} = N, Prefix, Module, Ind, Acc) ->
+    emit_rpc_like("rpc", N, Prefix, Module, Ind, Acc);
+emit_node(#{node_type := action} = N, Prefix, Module, Ind, Acc) ->
+    emit_rpc_like("action", N, Prefix, Module, Ind, Acc);
+emit_node(#{node_type := notification} = N, Prefix, Module, Ind, Acc) ->
+    Path = maps:get(path, N),
+    {KidsTxt, Acc1} = emit_nodes(own_children(Prefix, Path, Module),
+                                 Prefix, Module, Ind + 1, Acc),
+    {block(Ind, "notification", maps:get(name, N),
+           desc_stmt(maps:get(desc, N, ""), Ind + 1) ++ KidsTxt), Acc1};
 emit_node(_, _Prefix, _Module, _Ind, Acc) ->
     {[], Acc}.
+
+emit_rpc_like(Kind, N, Prefix, Module, Ind, Acc) ->
+    Path = maps:get(path, N),
+    Kids = own_children(Prefix, Path, Module),
+    {InTxt, Acc1} = emit_io("input", find_named(Kids, "input"), Prefix, Module, Ind + 1, Acc),
+    {OutTxt, Acc2} = emit_io("output", find_named(Kids, "output"), Prefix, Module, Ind + 1, Acc1),
+    {block(Ind, Kind, maps:get(name, N),
+           desc_stmt(maps:get(desc, N, ""), Ind + 1) ++ InTxt ++ OutTxt), Acc2}.
+
+find_named(Kids, Name) ->
+    case [K || K <- Kids, maps:get(name, K) =:= Name] of
+        [K | _] -> K;
+        [] -> undefined
+    end.
+
+emit_io(_Kind, undefined, _Prefix, _Module, _Ind, Acc) ->
+    {[], Acc};
+emit_io(Kind, #{path := Path}, Prefix, Module, Ind, Acc) ->
+    Kids = own_children(Prefix, Path, Module),
+    case Kids of
+        [] ->
+            {[], Acc};
+        _ ->
+            {KidsTxt, Acc1} = emit_nodes(Kids, Prefix, Module, Ind + 1, Acc),
+            {[pad(Ind), Kind, " {\n", KidsTxt, pad(Ind), "}\n"], Acc1}
+    end.
 
 block(Ind, Kind, Name, Body) ->
     [pad(Ind), Kind, $ , quote_ident(Name), " {\n", Body, pad(Ind), "}\n"].
@@ -409,12 +445,21 @@ must_stmts(Opts, Ind) ->
     [must_stmt(M, Ind) || {must, M} <- Opts].
 
 must_stmt(#{expr := Expr} = M, Ind) ->
-    case maps:get(error_message, M, undefined) of
-        undefined ->
+    Msg = maps:get(error_message, M, undefined),
+    Tag = maps:get(error_app_tag, M, undefined),
+    case {Msg, Tag} of
+        {undefined, undefined} ->
             [pad(Ind), "must ", quote_str(Expr), ";\n"];
-        Msg ->
+        _ ->
             [pad(Ind), "must ", quote_str(Expr), " {\n",
-             pad(Ind + 1), "error-message ", quote_str(Msg), ";\n",
+             case Msg of
+                 undefined -> [];
+                 _ -> [pad(Ind + 1), "error-message ", quote_str(Msg), ";\n"]
+             end,
+             case Tag of
+                 undefined -> [];
+                 _ -> [pad(Ind + 1), "error-app-tag ", quote_str(Tag), ";\n"]
+             end,
              pad(Ind), "}\n"]
     end.
 

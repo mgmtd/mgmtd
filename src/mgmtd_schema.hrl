@@ -21,8 +21,9 @@
 -type path_node() :: string() | list_key() | '_'.
 -type item_path() :: [path_node()].
 -type schema_path() :: [string() | '_'].
--type node_type() :: container | leaf | list | leaf_list | list_key.
--type cmd_type() :: show | set | delete | move.
+-type node_type() :: container | leaf | list | leaf_list | list_key
+                   | rpc | action | notification.
+-type cmd_type() :: show | set | delete | move | schema | operations.
 -type schema_source() :: json | function | yang | unknown.
 -type schema_info() :: #{prefix := prefix(),
                          module := string(),
@@ -41,7 +42,7 @@
 -record(schema,
         {path :: {schema_path(), prefix()},     % Schema path + prefix
          prefix = ?DEFAULT_NS :: prefix(),
-         node_type :: node_type(),  % container | leaf | list | leaf_list
+         node_type :: node_type(),  % container | leaf | list | leaf_list | rpc | action | notification
          name :: string(),
          desc :: string(),
          type :: mgmtd:data_type() | undefined,

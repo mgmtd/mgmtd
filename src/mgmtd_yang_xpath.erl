@@ -965,11 +965,45 @@ xpath_lit(S) ->
 
 %%--------------------------------------------------------------------
 %% XML projection (from flat #cfg{} rows; do not use the zipper)
+%%
+%% Schema defaults are injected into the accessible tree (RFC 7950
+%% §7.6.1 / §11) so `when`/`must` see them. They are not persisted.
 %%--------------------------------------------------------------------
 
 project_xml(Rows) ->
-    {Content, Index, _} = emit_children([], Rows, [], 1, #{}),
+    Rows1 = Rows ++ default_rows(Rows),
+    {Content, Index, _} = emit_children([], Rows1, [], 1, #{}),
     {#xmlDocument{content = Content}, Index}.
+
+default_rows(Rows) ->
+    ByPath = maps:from_list([{P, true} || #cfg{path = P} <- Rows]),
+    Parents = lists:usort(
+                [[] | [P || #cfg{path = P, node_type = T} <- Rows,
+                            T =:= container orelse T =:= list_key]]),
+    lists:append([defaults_at(P, ByPath) || P <- Parents]).
+
+defaults_at(Parent, ByPath) ->
+    Kids = try mgmtd_schema:children(Parent, show) of
+               Cs when is_list(Cs) -> Cs
+           catch
+               _:_ -> []
+           end,
+    lists:append([maybe_default_cfg(Parent, K, ByPath) || K <- Kids]).
+
+maybe_default_cfg(_Parent, #{config := false}, _ByPath) ->
+    [];
+maybe_default_cfg(Parent, #{node_type := Leaf, name := Name} = Schema, ByPath)
+  when Leaf =:= leaf; Leaf =:= leaf_list ->
+    Default = maps:get(default, Schema, undefined),
+    Path = Parent ++ [Name],
+    case Default =:= undefined orelse maps:is_key(Path, ByPath) of
+        true ->
+            [];
+        false ->
+            [#cfg{path = Path, name = Name, node_type = Leaf, value = Default}]
+    end;
+maybe_default_cfg(_, _, _) ->
+    [].
 
 child_rows(Parent, Rows) ->
     Len = length(Parent),

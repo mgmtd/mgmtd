@@ -123,7 +123,26 @@ load_node(#leaf_list{name = Name, desc = Desc, type = Type, config = Config0} = 
                 mandatory = Node#leaf_list.mandatory,
                 config = Config,
                 opts = Node#leaf_list.opts},
-    true = ets:insert_new(mgmtd_schema:commands_tab(), LeafList).
+    true = ets:insert_new(mgmtd_schema:commands_tab(), LeafList);
+load_node(#rpc{name = Name, desc = Desc} = Node, Path, Ns, _IsConfig, ParentCb) ->
+    load_rpc_like(rpc, Name, Desc, Node#rpc.callback, Node#rpc.opts,
+                  Node#rpc.input, Node#rpc.output, Path, Ns, ParentCb);
+load_node(#action{name = Name, desc = Desc} = Node, Path, Ns, _IsConfig, ParentCb) ->
+    load_rpc_like(action, Name, Desc, Node#action.callback, Node#action.opts,
+                  Node#action.input, Node#action.output, Path, Ns, ParentCb);
+load_node(#notification{name = Name, desc = Desc} = Node, Path, Ns, _IsConfig, ParentCb) ->
+    Callback = mgmtd_schema:resolve_data_callback(undefined, ParentCb, false),
+    FullPath = lists:reverse([Name | Path]),
+    Rec = #schema{path = {FullPath, Ns},
+                  prefix = Ns,
+                  node_type = notification,
+                  name = Name,
+                  desc = Desc,
+                  data_callback = Callback,
+                  config = false,
+                  opts = Node#notification.opts},
+    true = ets:insert_new(mgmtd_schema:commands_tab(), Rec),
+    load(Node#notification.children, [Name | Path], Ns, false, Callback).
 
 %% Load records whose `config` flags are already resolved (YANG compiler).
 load_resolved(Prefix, Nodes, Callback) ->
@@ -238,7 +257,26 @@ load_node_resolved(#leaf_list{name = Name, desc = Desc, type = Type, config = Co
                 mandatory = Node#leaf_list.mandatory,
                 config = Config,
                 opts = origin_opts(Node#leaf_list.opts, Origin)},
-    true = ets:insert_new(mgmtd_schema:commands_tab(), LeafList).
+    true = ets:insert_new(mgmtd_schema:commands_tab(), LeafList);
+load_node_resolved(#rpc{name = Name, desc = Desc} = Node, Path, Ns, ParentCb, Origin) ->
+    load_rpc_like_resolved(rpc, Name, Desc, Node#rpc.callback, Node#rpc.opts,
+                           Node#rpc.input, Node#rpc.output, Path, Ns, ParentCb, Origin);
+load_node_resolved(#action{name = Name, desc = Desc} = Node, Path, Ns, ParentCb, Origin) ->
+    load_rpc_like_resolved(action, Name, Desc, Node#action.callback, Node#action.opts,
+                           Node#action.input, Node#action.output, Path, Ns, ParentCb, Origin);
+load_node_resolved(#notification{name = Name, desc = Desc} = Node, Path, Ns, ParentCb, Origin) ->
+    Callback = mgmtd_schema:resolve_data_callback(undefined, ParentCb, false),
+    FullPath = lists:reverse([Name | Path]),
+    Rec = #schema{path = {FullPath, Ns},
+                  prefix = Ns,
+                  node_type = notification,
+                  name = Name,
+                  desc = Desc,
+                  data_callback = Callback,
+                  config = false,
+                  opts = origin_opts(Node#notification.opts, Origin)},
+    true = ets:insert_new(mgmtd_schema:commands_tab(), Rec),
+    load_resolved_children(Node#notification.children, [Name | Path], Ns, Callback, Origin).
 
 origin_opts(Opts, undefined) ->
     Opts;
@@ -266,7 +304,53 @@ node_names(Children) ->
 node_name(#leaf{name = Name}) -> Name;
 node_name(#leaf_list{name = Name}) -> Name;
 node_name(#list{name = Name}) -> Name;
-node_name(#container{name = Name}) -> Name.
+node_name(#container{name = Name}) -> Name;
+node_name(#rpc{name = Name}) -> Name;
+node_name(#action{name = Name}) -> Name;
+node_name(#notification{name = Name}) -> Name.
+
+load_rpc_like(Type, Name, Desc, NodeCb, Opts, InputFun, OutputFun, Path, Ns, ParentCb) ->
+    Callback = mgmtd_schema:resolve_data_callback(NodeCb, ParentCb, false),
+    FullPath = lists:reverse([Name | Path]),
+    Rec = #schema{path = {FullPath, Ns},
+                  prefix = Ns,
+                  node_type = Type,
+                  name = Name,
+                  desc = Desc,
+                  data_callback = Callback,
+                  config = false,
+                  opts = Opts},
+    true = ets:insert_new(mgmtd_schema:commands_tab(), Rec),
+    load_io("input", InputFun, [Name | Path], Ns, Callback),
+    load_io("output", OutputFun, [Name | Path], Ns, Callback).
+
+load_rpc_like_resolved(Type, Name, Desc, NodeCb, Opts, InputFun, OutputFun,
+                       Path, Ns, ParentCb, Origin) ->
+    Callback = mgmtd_schema:resolve_data_callback(NodeCb, ParentCb, false),
+    FullPath = lists:reverse([Name | Path]),
+    Rec = #schema{path = {FullPath, Ns},
+                  prefix = Ns,
+                  node_type = Type,
+                  name = Name,
+                  desc = Desc,
+                  data_callback = Callback,
+                  config = false,
+                  opts = origin_opts(Opts, Origin)},
+    true = ets:insert_new(mgmtd_schema:commands_tab(), Rec),
+    load_io_resolved("input", InputFun, [Name | Path], Ns, Callback, Origin),
+    load_io_resolved("output", OutputFun, [Name | Path], Ns, Callback, Origin).
+
+load_io(Name, Fun, Path, Ns, Callback) ->
+    Container = #container{name = Name,
+                           config = false,
+                           children = Fun},
+    load_node(Container, Path, Ns, false, Callback).
+
+load_io_resolved(Name, Fun, Path, Ns, Callback, Origin) ->
+    Container = #container{name = Name,
+                           config = false,
+                           children = Fun},
+    load_node_resolved(Container, Path, Ns, Callback, Origin).
 
 %% config is true only inside a config tree: a node with config = true
 %% starts a tree, and descendants inherit true even if they leave the
