@@ -84,7 +84,9 @@ load_function_schema(Fun, Opts) ->
 
 %% @doc Load a YANG 1.1 / 1.0 module file.
 %% Prefix defaults to the module `prefix` statement; namespace is the
-%% module URI. Override with `#{prefix => Atom}`.
+%% module URI. Override with `#{prefix => Atom}`. `#{prefix => default}`
+%% folds the module into the silent CLI prefix (alongside a function or
+%% JSON schema already loaded there) so paths stay `show status ...`.
 %%
 %% Host modules are named in the YANG with mgmtd extensions
 %% (`import mgmtd { prefix mgmtd; }` from `priv/yang/mgmtd.yang`):

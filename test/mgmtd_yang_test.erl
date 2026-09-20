@@ -194,6 +194,22 @@ load_yang_with_default_prefix_test() ->
         mgmtd_schema:lookup(["server", "servers", "port"]),
     ok = mgmtd:remove_schema().
 
+%% Hosts load a function schema on `default`, then YANG with
+%% `#{prefix => default}` so operational `status` stays `show status`.
+yang_default_prefix_after_function_schema_test() ->
+    start_mgmtd(),
+    lists:foreach(fun mgmtd:remove_schema/1, mgmtd:registered_schemas()),
+    ok = mgmtd:load_function_schema(fun mgmtd_test_schema:cfg_schema/0,
+                                    #{config => true}),
+    ok = mgmtd:load_yang_module("test/yang/example-oper.yang",
+                                #{prefix => default}),
+    #{ns := default, node_type := container, config := true} =
+        mgmtd_schema:lookup(["server"]),
+    #{ns := default, node_type := container, config := false,
+      data_callback := mgmtd_test_provider} =
+        mgmtd_schema:lookup(["status"]),
+    ok = mgmtd:remove_schema().
+
 yang_txn_set_commit_test() ->
     start_mgmtd(),
     lists:foreach(fun mgmtd:remove_schema/1, mgmtd:registered_schemas()),

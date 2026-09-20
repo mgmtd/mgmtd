@@ -146,6 +146,8 @@ remove_schema(Ns) ->
 
 %% @doc Validate load options and name-clash rules before inserting nodes.
 %% Same prefix with the same namespace is additive (several files, one identity).
+%% `default` may also absorb further sources (`#{prefix => default}`) so CLI
+%% paths stay unprefixed; named prefixes remain 1:1 with a namespace URI.
 -spec prepare_load(map(), schema_source(), [string()]) ->
           {ok, prefix(), namespace()} | {error, term()}.
 prepare_load(Opts, _Source, TopNames) when is_map(Opts), is_list(TopNames) ->
@@ -588,6 +590,11 @@ check_identity(Prefix, Namespace) ->
             case namespace_uri(maps:get(namespace, Existing)) of
                 URI ->
                     ok;
+                _Other when Prefix =:= ?DEFAULT_NS ->
+                    %% Fold into the silent CLI prefix. Hosts load a function
+                    %% or JSON schema first, then YANG with `#{prefix => default}`
+                    %% so `show status` is not `show status status`.
+                    check_namespace_unique(Prefix, URI);
                 Other ->
                     {error, {prefix_namespace_mismatch, Prefix, Other}}
             end

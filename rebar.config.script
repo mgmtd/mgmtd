@@ -1,6 +1,0 @@
-%% geas_rebar3 1.6 / geas 2.11 are not usable on OTP 24 (newer BEAM opcodes).
-Otp = list_to_integer(erlang:system_info(otp_release)),
-case Otp >= 26 of
-    true -> CONFIG;
-    false -> lists:keydelete(project_plugins, 1, CONFIG)
-end.
