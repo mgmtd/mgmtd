@@ -168,6 +168,12 @@ aaa_http_required() ->
 %% After a successful read the main store is created with that
 %% content. Later starts use the main store and ignore the startup
 %% file. `{startup, []}` disables it.
+%%
+%% Existing rows are then upgraded against the currently loaded
+%% schema: nodes that disappeared are dropped, leaf values are coerced
+%% (or reset to the current default), and list keys are rewritten.
+%% Nodes that are only in the new schema are not inserted. See
+%% `SCHEMA_UPGRADE.md`.
 load_config_db(DirPath) ->
     Opts = application:get_env(mgmtd, db, []),
     mgmtd_cfg_db:init(DirPath, Opts).

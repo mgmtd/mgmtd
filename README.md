@@ -78,7 +78,10 @@ TODO
       uses HTTP Basic against plaintext `aaa` passwords (`mgmtd_aaa`).
       NACM, hashed secrets, SSO later.
 - [ ] Some kind of external API so programs outside of the host erlang system can read and subscribe to config
-- [ ] Automatic / programmable database migration during startup after a schema change 
+- [x] Automatic database migration at startup for existing rows
+      (deleted nodes, type coercion, list-key rewrite). Does not
+      insert new schema nodes or apply “old default → new default”
+      without a previous-schema snapshot.
 - [ ] Restriction to prevent new schemas being loaded after startup
 - [x] Yang rpc and action, hooked into RESTCONF (`mgmtd:rpc/2`, `mgmtd:action/2`, `POST /restconf/operations`, nested action POST)
 - [ ] XML based RESTCONF. Today it's only JSON

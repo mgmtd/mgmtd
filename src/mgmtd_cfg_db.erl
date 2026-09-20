@@ -32,6 +32,10 @@
 %% startup store (`{startup, [{backend, sys_config}, {file, Path}]}`
 %% in `Opts` or application env `startup`) is read once and written
 %% into the new main store.
+%%
+%% After the store is open, `mgmtd_cfg_upgrade` walks existing rows
+%% against the currently loaded schema (deleted nodes, type coercion,
+%% list-key changes). Missing schema nodes are not inserted.
 -spec init(file:filename(), proplists:proplist()) -> ok | {error, term()}.
 init(DbLocation, Opts) ->
     Backend = proplists:get_value(backend, Opts, mnesia),
@@ -50,21 +54,29 @@ finish_init(DbLocation, Opts, BackendMod, Created) ->
     true = ets:insert(mgmtd_meta, {db_location, DbLocation}),
     case mgmtd_cfg_rollback:init(DbLocation, rollback_count(Opts)) of
         ok ->
-            case mgmtd_cfg_startup:maybe_load(Created, Opts) of
-                ok ->
-                    ok;
-                {error, _} = SeedErr ->
-                    case Created of
-                        new ->
-                            _ = remove_db(DbLocation, Opts);
-                        existing ->
-                            ok
-                    end,
-                    SeedErr
-            end;
+            after_open(Created, DbLocation, Opts);
         {error, _} = RollbackErr ->
             RollbackErr
     end.
+
+after_open(Created, DbLocation, Opts) ->
+    case mgmtd_cfg_startup:maybe_load(Created, Opts) of
+        ok ->
+            case mgmtd_cfg_upgrade:maybe_upgrade() of
+                ok ->
+                    ok;
+                {error, _} = UpgErr ->
+                    abort_open(Created, DbLocation, Opts, UpgErr)
+            end;
+        {error, _} = SeedErr ->
+            abort_open(Created, DbLocation, Opts, SeedErr)
+    end.
+
+abort_open(new, DbLocation, Opts, Err) ->
+    _ = remove_db(DbLocation, Opts),
+    Err;
+abort_open(existing, _DbLocation, _Opts, Err) ->
+    Err.
 
 remove_db(DbLocation, Opts) ->
     Backend = proplists:get_value(backend, Opts, mnesia),
