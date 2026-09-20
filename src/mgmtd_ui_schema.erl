@@ -28,7 +28,7 @@ module_json(#{prefix := Prefix, module := Module, namespace := URI,
               source := Source} = Info) ->
     Top = prefix_base(Prefix),
     Children = [node_json(Prefix, Module, Module, Top, C)
-                || C <- restconf_children(Prefix, Top)],
+                || C <- restconf_children(Prefix, Top) ++ rpc_children(Prefix)],
     Base = #{<<"name">> => bin(Module),
              <<"prefix">> => atom_to_binary(Prefix, utf8),
              <<"namespace">> => bin(URI),
@@ -54,7 +54,7 @@ node_json(Prefix, PrefixMod, ParentMod, ParentPath, Schema) ->
               <<"module">> => bin(PrefixMod),
               <<"qname">> => qname(PrefixMod, Name),
               <<"json_name">> => JsonName,
-              <<"path">> => mgmtd_restconf_path:data_uri(Item),
+              <<"path">> => node_path(Kind, PrefixMod, Name, Item),
               <<"config">> => maps:get(config, Schema, false)},
     Node1 = put_opt(Node0, <<"desc">>, nonempty(maps:get(desc, Schema, ""))),
     Node2 = put_opt(Node1, <<"mandatory">>,
@@ -106,6 +106,9 @@ restconf_children(Prefix, Path) ->
                andalso Path =:= []
                andalso lists:member(maps:get(name, C), Named))].
 
+rpc_children(Prefix) ->
+    [R || R <- mgmtd_schema:rpcs(), maps:get(ns, R) =:= Prefix].
+
 prefix_base(?DEFAULT_NS) ->
     [];
 prefix_base(Prefix) ->
@@ -125,6 +128,12 @@ kind_bin(leaf_list) ->
     <<"leaf-list">>;
 kind_bin(Kind) ->
     atom_to_binary(Kind, utf8).
+
+%% RFC 8040 §3.6: top-level rpc lives under `{+restconf}/operations`.
+node_path(rpc, Module, Name, _Item) ->
+    iolist_to_binary(["/restconf/operations/", Module, $:, Name]);
+node_path(_Kind, _Module, _Name, Item) ->
+    mgmtd_restconf_path:data_uri(Item).
 
 qname(Module, Name) ->
     iolist_to_binary([Module, $:, Name]).

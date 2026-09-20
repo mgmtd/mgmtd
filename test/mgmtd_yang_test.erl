@@ -863,6 +863,286 @@ default_in_accessible_tree_test() ->
         mgmtd_cfg_db:remove_db(Db, [{backend, mnesia}])
     end.
 
+compile_mgmtd_yang_no_data_nodes_test() ->
+    {ok, #{module := "mgmtd", prefix := mgmtd, nodes := []}} =
+        mgmtd_schema_yang:compile_file("priv/yang/mgmtd.yang").
+
+parse_mgmtd_extension_test() ->
+    Yang = <<"
+        module m {
+          namespace \"urn:m\";
+          prefix m;
+          container status {
+            config false;
+            mgmtd:data-callback \"example_provider\";
+          }
+        }
+    ">>,
+    {ok, [{module, _, <<"m">>, Body}]} = mgmtd_yang_parse:string(Yang),
+    {container, _, <<"status">>, CBody} = lists:keyfind(container, 1, Body),
+    {{<<"mgmtd">>, <<"data-callback">>}, _, <<"example_provider">>, []} =
+        lists:keyfind({<<"mgmtd">>, <<"data-callback">>}, 1, CBody).
+
+compile_data_callback_test() ->
+    Yang = <<"
+        module m {
+          namespace \"urn:m\";
+          prefix m;
+          container status {
+            config false;
+            mgmtd:data-callback \"example_provider\";
+            leaf uptime { type string; }
+          }
+        }
+    ">>,
+    {ok, Stmts} = mgmtd_yang_parse:string(Yang),
+    {ok, #{nodes := [#container{name = "status",
+                                config = false,
+                                data_callback = example_provider,
+                                children = Ch}]}} =
+        mgmtd_schema_yang:compile(Stmts),
+    #leaf{name = "uptime", data_callback = undefined} =
+        lists:keyfind("uptime", #leaf.name, Ch()).
+
+compile_imported_prefix_test() ->
+    Yang = <<"
+        module m {
+          namespace \"urn:m\";
+          prefix m;
+          import mgmtd { prefix mtd; }
+          container status {
+            config false;
+            mtd:data-callback \"example_provider\";
+            mtd:codec \"mgmtd_test_codec\";
+            mtd:validate \"my_validator\";
+          }
+        }
+    ">>,
+    {ok, Stmts} = mgmtd_yang_parse:string(Yang),
+    {ok, #{nodes := [#container{name = "status",
+                                data_callback = example_provider,
+                                opts = Opts}]}} =
+        mgmtd_schema_yang:compile(Stmts),
+    ?assertEqual({codec, mgmtd_test_codec}, lists:keyfind(codec, 1, Opts)),
+    ?assertEqual({mgmtd, validate, "my_validator"},
+                 lists:keyfind(mgmtd, 1, Opts)).
+
+compile_rpc_data_callback_test() ->
+    Yang = <<"
+        module m {
+          namespace \"urn:m\";
+          prefix m;
+          rpc echo {
+            mgmtd:data-callback \"mgmtd_test_rpc\";
+            input { leaf in { type string; } }
+            output { leaf out { type string; } }
+          }
+        }
+    ">>,
+    {ok, Stmts} = mgmtd_yang_parse:string(Yang),
+    {ok, #{nodes := [#rpc{name = "echo", callback = mgmtd_test_rpc}]}} =
+        mgmtd_schema_yang:compile(Stmts).
+
+compile_module_level_callback_test() ->
+    Yang = <<"
+        module m {
+          namespace \"urn:m\";
+          prefix m;
+          mgmtd:data-callback \"example_provider\";
+          container status {
+            config false;
+            leaf uptime { type string; }
+          }
+        }
+    ">>,
+    {ok, Stmts} = mgmtd_yang_parse:string(Yang),
+    {ok, #{callback := example_provider,
+           nodes := [#container{data_callback = undefined}]}} =
+        mgmtd_schema_yang:compile(Stmts).
+
+compile_uses_data_callback_test() ->
+    Yang = <<"
+        module m {
+          namespace \"urn:m\";
+          prefix m;
+          grouping g {
+            leaf x { type string; }
+          }
+          container c {
+            config false;
+            uses g {
+              mgmtd:data-callback \"example_provider\";
+            }
+          }
+        }
+    ">>,
+    {ok, Stmts} = mgmtd_yang_parse:string(Yang),
+    {ok, #{nodes := [#container{name = "c", children = Ch}]}} =
+        mgmtd_schema_yang:compile(Stmts),
+    #leaf{name = "x", data_callback = example_provider} =
+        lists:keyfind("x", #leaf.name, Ch()).
+
+compile_refine_data_callback_test() ->
+    Yang = <<"
+        module m {
+          namespace \"urn:m\";
+          prefix m;
+          grouping g {
+            leaf x { type string; }
+          }
+          container c {
+            uses g {
+              refine x {
+                mgmtd:data-callback \"example_provider\";
+              }
+            }
+          }
+        }
+    ">>,
+    {ok, Stmts} = mgmtd_yang_parse:string(Yang),
+    {ok, #{nodes := [#container{children = Ch}]}} =
+        mgmtd_schema_yang:compile(Stmts),
+    #leaf{name = "x", data_callback = example_provider} =
+        lists:keyfind("x", #leaf.name, Ch()).
+
+yang_data_callback_inherited_test() ->
+    start_mgmtd(),
+    lists:foreach(fun mgmtd:remove_schema/1, mgmtd:registered_schemas()),
+    ok = mgmtd:load_yang_module("test/yang/example-oper.yang",
+                                #{prefix => default}),
+    try
+        #{config := false, data_callback := mgmtd_test_provider} =
+            mgmtd_schema:lookup(["status"]),
+        ?assertEqual(mgmtd_test_provider,
+                     mgmtd_schema:data_callback(["status", "uptime"])),
+        ?assertEqual(mgmtd_test_provider,
+                     mgmtd_schema:data_callback(["status", "interfaces", "mtu"])),
+        ?assertEqual({ok, "1d4h"}, mgmtd:lookup(["status", "uptime"])),
+        ?assertEqual({ok, ["core", "edge"]}, mgmtd:lookup(["status", "tags"]))
+    after
+        mgmtd:remove_schema()
+    end.
+
+yang_module_level_callback_load_test() ->
+    start_mgmtd(),
+    lists:foreach(fun mgmtd:remove_schema/1, mgmtd:registered_schemas()),
+    Yang = <<"
+        module m {
+          namespace \"urn:m\";
+          prefix m;
+          mgmtd:data-callback \"mgmtd_test_provider\";
+          container status {
+            config false;
+            leaf uptime { type string; }
+          }
+        }
+    ">>,
+    ok = mgmtd:load_yang_module_binary(Yang, #{prefix => default}),
+    try
+        ?assertEqual(mgmtd_test_provider,
+                     mgmtd_schema:data_callback(["status"])),
+        ?assertEqual(mgmtd_test_provider,
+                     mgmtd_schema:data_callback(["status", "uptime"])),
+        ?assertEqual({ok, "1d4h"}, mgmtd:lookup(["status", "uptime"]))
+    after
+        mgmtd:remove_schema()
+    end.
+
+yang_load_option_overrides_module_callback_test() ->
+    start_mgmtd(),
+    lists:foreach(fun mgmtd:remove_schema/1, mgmtd:registered_schemas()),
+    Yang = <<"
+        module m {
+          namespace \"urn:m\";
+          prefix m;
+          mgmtd:data-callback \"example_provider\";
+          container status {
+            config false;
+            leaf uptime { type string; }
+          }
+        }
+    ">>,
+    ok = mgmtd:load_yang_module_binary(
+           Yang, #{prefix => default, callback => mgmtd_test_provider}),
+    try
+        ?assertEqual(mgmtd_test_provider,
+                     mgmtd_schema:data_callback(["status", "uptime"]))
+    after
+        mgmtd:remove_schema()
+    end.
+
+yang_node_callback_wins_over_load_option_test() ->
+    start_mgmtd(),
+    lists:foreach(fun mgmtd:remove_schema/1, mgmtd:registered_schemas()),
+    Yang = <<"
+        module m {
+          namespace \"urn:m\";
+          prefix m;
+          container status {
+            config false;
+            mgmtd:data-callback \"mgmtd_test_provider\";
+            leaf uptime { type string; }
+          }
+        }
+    ">>,
+    ok = mgmtd:load_yang_module_binary(
+           Yang, #{prefix => default, callback => example_provider}),
+    try
+        ?assertEqual(mgmtd_test_provider,
+                     mgmtd_schema:data_callback(["status"])),
+        ?assertEqual(mgmtd_test_provider,
+                     mgmtd_schema:data_callback(["status", "uptime"]))
+    after
+        mgmtd:remove_schema()
+    end.
+
+yang_rpc_data_callback_test() ->
+    start_mgmtd(),
+    lists:foreach(fun mgmtd:remove_schema/1, mgmtd:registered_schemas()),
+    Yang = <<"
+        module example-rpc {
+          namespace \"urn:example:rpc\";
+          prefix rpc;
+          rpc echo {
+            mgmtd:data-callback \"mgmtd_test_rpc\";
+            input { leaf in { type string; } }
+            output { leaf out { type string; } }
+          }
+        }
+    ">>,
+    ok = mgmtd:load_yang_module_binary(Yang),
+    try
+        #{node_type := rpc, data_callback := mgmtd_test_rpc} =
+            mgmtd_schema:lookup(["rpc", "echo"]),
+        {ok, #{"out" := "echo:hi"}} =
+            mgmtd:rpc(["rpc", "echo"], #{"in" => "hi"})
+    after
+        mgmtd:remove_schema(rpc)
+    end.
+
+yang_codec_opt_test() ->
+    start_mgmtd(),
+    lists:foreach(fun mgmtd:remove_schema/1, mgmtd:registered_schemas()),
+    Yang = <<"
+        module m {
+          namespace \"urn:m\";
+          prefix m;
+          list items {
+            key name;
+            mgmtd:codec \"mgmtd_test_codec\";
+            leaf name { type string; }
+            leaf n { type int32; }
+          }
+        }
+    ">>,
+    ok = mgmtd:load_yang_module_binary(Yang, #{prefix => default, config => true}),
+    try
+        ?assertEqual(mgmtd_test_codec, mgmtd_schema:codec(["items"])),
+        ?assertEqual(undefined, mgmtd_schema:codec(["items", "name"]))
+    after
+        mgmtd:remove_schema()
+    end.
+
 must_and_when_stored_on_opts_test() ->
     Yang = <<"
         module m {

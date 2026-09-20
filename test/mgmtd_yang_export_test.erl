@@ -8,6 +8,8 @@ export_test_() ->
       fun round_trip_function_schema/0,
       fun original_yang_source_is_kept/0,
       fun stdlib_inet_types/0,
+      fun stdlib_mgmtd_extensions/0,
+      fun data_callback_is_exported/0,
       fun schema_uri_omits_builtins/0,
       fun unknown_module/0]}.
 
@@ -73,6 +75,35 @@ stdlib_inet_types() ->
     ?assertEqual(Body, Same),
     ?assertEqual({error, not_found},
                  mgmtd:export_yang("ietf-inet-types", "1999-01-01")).
+
+stdlib_mgmtd_extensions() ->
+    {ok, Body} = mgmtd:export_yang("mgmtd"),
+    ?assert(binary:match(Body, <<"module mgmtd">>) =/= nomatch),
+    ?assert(binary:match(Body, <<"extension data-callback">>) =/= nomatch),
+    ?assert(binary:match(Body, <<"extension codec">>) =/= nomatch),
+    {ok, Same} = mgmtd:export_yang("mgmtd", "2026-09-20"),
+    ?assertEqual(Body, Same).
+
+data_callback_is_exported() ->
+    ok = mgmtd:load_function_schema(fun mgmtd_test_provider:schema/0,
+                                    #{namespace => oper}),
+    {ok, Yang} = mgmtd:export_yang("oper"),
+    ?assert(binary:match(Yang, <<"import mgmtd">>) =/= nomatch),
+    ?assert(binary:match(Yang, <<"mgmtd:data-callback \"mgmtd_test_provider\"">>)
+            =/= nomatch),
+    ok = mgmtd:remove_schema(oper),
+    Tmp = "test/.mgmtd_export_oper.yang",
+    ok = file:write_file(Tmp, Yang),
+    try
+        ?assertEqual(ok, mgmtd:load_yang_module(Tmp)),
+        ?assertEqual(mgmtd_test_provider,
+                     mgmtd_schema:data_callback(["oper", "status"])),
+        ?assertEqual(mgmtd_test_provider,
+                     mgmtd_schema:data_callback(["oper", "status", "uptime"]))
+    after
+        file:delete(Tmp),
+        _ = mgmtd:remove_schema(oper)
+    end.
 
 schema_uri_omits_builtins() ->
     Builtin = #{name => "ietf-yang-library",

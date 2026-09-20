@@ -1,0 +1,71 @@
+module example-oper {
+  namespace "urn:example:oper";
+  prefix oper;
+
+  import mgmtd {
+    prefix mgmtd;
+  }
+
+  import ietf-inet-types {
+    prefix inet;
+  }
+
+  description
+    "Operational status tree. The provider is named with
+     mgmtd:data-callback; descendants inherit it.";
+
+  container status {
+    config false;
+    mgmtd:data-callback "mgmtd_test_provider";
+    description "Operational status";
+
+    leaf uptime {
+      type string;
+      description "Time since boot";
+    }
+
+    leaf-list tags {
+      type string;
+      description "Status tags";
+    }
+
+    list interfaces {
+      key "name";
+      description "Interface status";
+
+      leaf name {
+        type string;
+        description "Interface name";
+      }
+      leaf state {
+        type enumeration {
+          enum up;
+          enum down;
+        }
+        description "Link state";
+      }
+      leaf mtu {
+        type uint32;
+        description "MTU";
+      }
+    }
+
+    list peers {
+      key "host port";
+      description "Peers by host and port";
+
+      leaf host {
+        type inet:ip-address;
+        description "Peer address";
+      }
+      leaf port {
+        type inet:port-number;
+        description "Peer port";
+      }
+      leaf state {
+        type string;
+        description "Session state";
+      }
+    }
+  }
+}

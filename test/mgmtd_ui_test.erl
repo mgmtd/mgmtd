@@ -23,7 +23,14 @@ ui_test_() ->
       fun select_leaf_and_save/0,
       fun invalid_leaf_shows_field_error/0,
       fun list_add_nested_and_delete/0,
-      fun stale_etag_shows_error/0]}.
+      fun stale_etag_shows_error/0,
+      fun no_actions_tab_without_rpcs/0,
+      fun actions_tab_when_schema_has_rpcs/0,
+      fun config_tree_hides_rpcs/0,
+      fun rpc_path_infers_actions/0,
+      fun wrong_mode_rpc_offers_actions/0,
+      fun invoke_echo_rpc/0,
+      fun invoke_restart_empty/0]}.
 
 setup() ->
     start_mgmtd(),
@@ -231,6 +238,95 @@ stale_etag_shows_error() ->
                    {<<"etag">>, <<"\"-1\"">>},
                    {<<"value">>, <<"1GbE">>}]),
     ?assert(is_substring("etag mismatch", Body)).
+
+no_actions_tab_without_rpcs() ->
+    {200, _, Body} = http_get("/mgmtd/ui"),
+    ?assertNot(is_substring("Actions", Body)),
+    ?assertNot(is_substring("mode=actions", Body)).
+
+actions_tab_when_schema_has_rpcs() ->
+    with_rpc(
+      fun() ->
+              {200, _, Config} = http_get("/mgmtd/ui"),
+              ?assert(is_substring("Actions", Config)),
+              ?assert(is_substring("mode=actions", Config)),
+              {200, _, Actions} = http_get("/mgmtd/ui?mode=actions"),
+              ?assert(is_substring("data-mode=\"actions\"", Actions)),
+              ?assert(is_substring(">echo<", Actions)),
+              ?assert(is_substring("operations", Actions)),
+              ?assert(is_substring("example-rpc", Actions)),
+              ?assert(is_substring("Select an action.", Actions)),
+              ?assertNot(is_substring(">server<", Actions)),
+              ?assertNot(is_substring(">box<", Actions))
+      end).
+
+config_tree_hides_rpcs() ->
+    with_rpc(
+      fun() ->
+              {200, _, Body} = http_get("/mgmtd/ui"),
+              ?assertNot(is_substring(">echo<", Body)),
+              ?assertNot(is_substring("operations", Body))
+      end).
+
+rpc_path_infers_actions() ->
+    with_rpc(
+      fun() ->
+              Path = "/restconf/operations/example-rpc:echo",
+              {200, _, Body} = http_get("/mgmtd/ui?path=" ++ Path),
+              ?assert(is_substring("data-mode=\"actions\"", Body)),
+              ?assert(is_substring("name=\"input.in\"", Body)),
+              ?assert(is_substring("Invoke", Body)),
+              ?assertNot(is_substring("read only", Body))
+      end).
+
+wrong_mode_rpc_offers_actions() ->
+    with_rpc(
+      fun() ->
+              Path = "/restconf/operations/example-rpc:echo",
+              {200, _, Body} = http_get("/mgmtd/ui?mode=config&path=" ++ Path),
+              ?assert(is_substring("This node is an action.", Body)),
+              ?assert(is_substring("Open in Actions", Body))
+      end).
+
+invoke_echo_rpc() ->
+    with_rpc(
+      fun() ->
+              Path = "/restconf/operations/example-rpc:echo",
+              {Code, _, Body} =
+                  form_post("/mgmtd/ui/rpc",
+                            [{<<"path">>, Path},
+                             {<<"return">>, Path},
+                             {<<"view">>, <<"index">>},
+                             {<<"mode">>, <<"actions">>},
+                             {<<"input.in">>, <<"hi">>}]),
+              ?assertEqual(200, Code),
+              ?assert(is_substring("echo:hi", Body)),
+              ?assert(is_substring("Output", Body)),
+              ?assert(is_substring("name=\"input.in\"", Body))
+      end).
+
+invoke_restart_empty() ->
+    with_rpc(
+      fun() ->
+              Path = "/restconf/operations/example-rpc:restart",
+              {200, _, Body} =
+                  form_post("/mgmtd/ui/rpc",
+                            [{<<"path">>, Path},
+                             {<<"return">>, Path},
+                             {<<"view">>, <<"index">>},
+                             {<<"mode">>, <<"actions">>}]),
+              ?assert(is_substring("Invoked. No output.", Body)),
+              ?assert(is_substring("No input.", Body))
+      end).
+
+with_rpc(Fun) ->
+    ok = mgmtd:load_yang_module("test/yang/example-rpc.yang",
+                                #{callback => mgmtd_test_rpc}),
+    try
+        Fun()
+    after
+        _ = mgmtd:remove_schema(rpc)
+    end.
 
 http_get(Path) ->
     Url = lists:flatten(

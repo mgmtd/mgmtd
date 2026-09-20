@@ -29,6 +29,8 @@ handle(<<"POST">>, add, Req) ->
     mgmtd_ui:http_post(add, Req);
 handle(<<"POST">>, delete, Req) ->
     mgmtd_ui:http_post(delete, Req);
+handle(<<"POST">>, rpc, Req) ->
+    mgmtd_ui:http_post(rpc, Req);
 handle(<<"OPTIONS">>, State, Req)
   when State =:= index; State =:= content ->
     cowboy_req:reply(200, #{<<"allow">> => <<"GET, HEAD, OPTIONS">>}, <<>>, Req);

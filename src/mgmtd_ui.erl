@@ -3,10 +3,12 @@
 %%
 %% Templates in `priv/templates` are the mgmtd-specific markup. The
 %% standalone page is `mgmtd_ui_index.dtl`; the embeddable fragment is
-%% `mgmtd_ui_content.dtl`. Form POSTs call `mgmtd_restconf_data`.
+%% `mgmtd_ui_content.dtl`. Form POSTs call `mgmtd_restconf_data`; RPC
+%% invoke uses `mgmtd_restconf_rpc`.
 %%
-%% Configuration and operational data are separate views (`?mode=config`
-%% by default, `?mode=oper` for state). The tree and pane show one.
+%% Configuration, operational data, and RPCs are separate views
+%% (`?mode=config` by default, `?mode=oper` for state, `?mode=actions`
+%% for RPCs when the schema has any). The tree and pane show one.
 %%
 %% This module does not start an HTTP listener. Hosts mount
 %% `cowboy_routes/0` (or `cowboy_routes/1`) on their Cowboy dispatch
@@ -40,13 +42,14 @@ http_get(Kind, Req) ->
             cowboy_req:reply(200, Headers, Body, Req)
     end.
 
--spec http_post(save | add | delete, cowboy_req:req()) -> cowboy_req:req().
+-spec http_post(save | add | delete | rpc, cowboy_req:req()) -> cowboy_req:req().
 http_post(Action, Req0) ->
     {ok, Qs, Req} = cowboy_req:read_urlencoded_body(Req0),
     finish(case Action of
                save -> save(Qs);
                add -> add(Qs);
-               delete -> delete(Qs)
+               delete -> delete(Qs);
+               rpc -> rpc(Qs)
            end, Req).
 
 -spec cowboy_routes() -> [{string(), module(), term()}].
@@ -61,6 +64,7 @@ cowboy_routes(Handler) ->
      {"/mgmtd/ui/save", Handler, save},
      {"/mgmtd/ui/add", Handler, add},
      {"/mgmtd/ui/delete", Handler, delete},
+     {"/mgmtd/ui/rpc", Handler, rpc},
      {"/mgmtd/ui", Handler, index},
      {"/mgmtd/ui/", Handler, index}].
 
@@ -84,6 +88,7 @@ compile() ->
                "mgmtd_ui_draft_field.dtl",
                "mgmtd_ui_list_item.dtl",
                "mgmtd_ui_list.dtl",
+               "mgmtd_ui_rpc.dtl",
                "mgmtd_ui_pane.dtl",
                "mgmtd_ui_mode_switch.dtl",
                "mgmtd_ui_content.dtl",
@@ -171,6 +176,57 @@ delete(Qs) ->
                        end
                end).
 
+rpc(Qs) ->
+    Path = qs_val(Qs, <<"path">>),
+    Return = qs_val(Qs, <<"return">>, Path),
+    View = qs_val(Qs, <<"view">>, <<"index">>),
+    Mode = parse_mode(qs_val(Qs, <<"mode">>)),
+    Draft = collect_prefixed(Qs, <<"input.">>),
+    case find_node(Path, modules()) of
+        #{<<"kind">> := <<"rpc">>} = Rpc ->
+            InputNode = rpc_io_node(Rpc, <<"input">>),
+            case build_all(InputNode, Draft, <<"input">>) of
+                {error, FieldErrs} ->
+                    {error, Return, View, Mode, FieldErrs, Draft};
+                {ok, Input} ->
+                    invoke_rpc(Rpc, Input, Return, View, Mode, Draft)
+            end;
+        _ ->
+            {error, Return, View, Mode, #{<<"page">> => <<"not an action">>}, Draft}
+    end.
+
+invoke_rpc(Rpc, Input, Return, View, Mode, Draft) ->
+    Path = maps:get(<<"path">>, Rpc),
+    Body = rpc_input_body(Rpc, Input),
+    case mgmtd_restconf_rpc:parse_operation(Path) of
+        {ok, {rpc, Module, _Name, RpcPath}} ->
+            case mgmtd_restconf_rpc:post_rpc(RpcPath, Module, Body) of
+                {ok, empty} ->
+                    {rpc, Return, View, Mode, empty, Draft, #{}};
+                {ok, Map} ->
+                    Out = unwrap(Map, rpc_io_node(Rpc, <<"output">>)),
+                    {rpc, Return, View, Mode, Out, Draft, #{}};
+                {error, Err} ->
+                    {error, Return, View, Mode, #{<<"page">> => err_msg(Err)}, Draft}
+            end;
+        {error, Err} ->
+            {error, Return, View, Mode, #{<<"page">> => err_msg(Err)}, Draft};
+        _ ->
+            {error, Return, View, Mode, #{<<"page">> => <<"not an action">>}, Draft}
+    end.
+
+rpc_io_node(Rpc, Name) ->
+    case find_child(Rpc, Name) of
+        undefined -> #{<<"name">> => Name, <<"children">> => [], <<"key_names">> => []};
+        Node -> Node
+    end.
+
+rpc_input_body(_Rpc, Input) when map_size(Input) =:= 0 ->
+    #{};
+rpc_input_body(Rpc, Input) ->
+    Mod = maps:get(<<"module">>, Rpc),
+    #{<<Mod/binary, ":input">> => Input}.
+
 after_etag(Etag, Return, View, Mode, Draft, Fun) ->
     case mgmtd_restconf_data:check_etag(Etag) of
         ok ->
@@ -207,7 +263,8 @@ page(Kind, Path, Opts) ->
     PageBase = page_base(Kind),
     View = view_name(Kind),
     Tree = render_modules(Filtered, Path, PageBase, Mode),
-    Pane = render_pane(Selected, Path, Errors, Draft, View, Mode, Mods),
+    RpcOutput = maps:get(rpc_output, Opts, undefined),
+    Pane = render_pane(Selected, Path, Errors, Draft, View, Mode, Mods, RpcOutput),
     Vars = [{css_href, ?CSS},
             {include_css, Kind =:= content},
             {include_mode_switch, Kind =:= content},
@@ -237,6 +294,13 @@ modules() ->
 
 finish({ok, Return, View, Mode}, Req) ->
     cowboy_req:reply(303, #{<<"location">> => loc(View, Return, Mode)}, <<>>, Req);
+finish({rpc, Return, View, Mode, Output, Draft, Errors}, Req) ->
+    Body = page(view_kind(View), Return,
+                #{errors => Errors, draft => Draft, mode => Mode,
+                  rpc_output => Output}),
+    cowboy_req:reply(200, #{<<"content-type">> => ?HTML,
+                            <<"content-length">> => integer_to_binary(byte_size(Body))},
+                     Body, Req);
 finish({error, Return, View, Mode, Errors, Draft}, Req) ->
     Body = page(view_kind(View), Return,
                 #{errors => Errors, draft => Draft, mode => Mode}),
@@ -259,6 +323,7 @@ path_qs(Path) ->
     [<<"path=", Quoted/binary>>].
 
 mode_qs(oper) -> [<<"mode=oper">>];
+mode_qs(actions) -> [<<"mode=actions">>];
 mode_qs(config) -> [].
 
 join_and([P]) -> P;
@@ -294,7 +359,7 @@ render_schema_node(N, Selected, PageBase, Depth, Mode) ->
     Path = maps:get(<<"path">>, N),
     Kind = maps:get(<<"kind">>, N),
     Kids0 = maps:get(<<"children">>, N, []),
-    ShowKids = Kind =/= <<"list">> andalso Kids0 =/= [],
+    ShowKids = Kind =/= <<"list">> andalso Kind =/= <<"rpc">> andalso Kids0 =/= [],
     Href = loc_href(PageBase, Path, Mode),
     Node = [{name, maps:get(<<"name">>, N)},
             {is_link, true},
@@ -331,21 +396,32 @@ path_open(Path, Selected) ->
 
 parse_mode(<<"oper">>) -> oper;
 parse_mode(<<"state">>) -> oper;
+parse_mode(<<"actions">>) -> actions;
+parse_mode(<<"action">>) -> actions;
+parse_mode(<<"rpc">>) -> actions;
 parse_mode(_) -> config.
 
 mode_bin(oper) -> <<"oper">>;
+mode_bin(actions) -> <<"actions">>;
 mode_bin(config) -> <<"config">>.
-
-other_mode(config) -> oper;
-other_mode(oper) -> config.
 
 infer_mode(<<>>, _) ->
     config;
 infer_mode(Path, Mods) ->
     case find_node(Path, Mods) of
+        #{<<"kind">> := <<"rpc">>} -> actions;
         #{<<"config">> := false} -> oper;
         _ -> config
     end.
+
+has_rpcs(Mods) ->
+    lists:any(
+      fun(M) ->
+              lists:any(fun is_rpc/1, maps:get(<<"children">>, M, []))
+      end, Mods).
+
+is_rpc(#{<<"kind">> := <<"rpc">>}) -> true;
+is_rpc(_) -> false.
 
 filter_modules(Mods, Mode) ->
     [M#{<<"children">> => Kids}
@@ -362,6 +438,8 @@ filter_nodes(Nodes, Mode) ->
               end
       end, Nodes).
 
+keep_node(N, actions) ->
+    N;
 keep_node(N, Mode) ->
     Kids0 = maps:get(<<"children">>, N, []),
     Kids = case maps:get(<<"kind">>, N, undefined) of
@@ -381,6 +459,12 @@ keep_node(N, Mode) ->
            end,
     N#{<<"children">> => Kids}.
 
+node_in_mode(#{<<"kind">> := <<"rpc">>}, actions) ->
+    true;
+node_in_mode(#{<<"kind">> := <<"rpc">>}, _Mode) ->
+    false;
+node_in_mode(_N, actions) ->
+    false;
 node_in_mode(N, Mode) ->
     case maps:get(<<"kind">>, N, undefined) of
         Kind when Kind =:= <<"leaf">>; Kind =:= <<"leaf-list">> ->
@@ -398,32 +482,42 @@ node_is_mode(N, oper) ->
 
 writable(Node, config) ->
     maps:get(<<"config">>, Node, false);
-writable(_Node, oper) ->
+writable(_Node, _Mode) ->
     false.
 
 empty_tree_msg(config) -> <<"No configuration schema.">>;
-empty_tree_msg(oper) -> <<"No operational schema.">>.
+empty_tree_msg(oper) -> <<"No operational schema.">>;
+empty_tree_msg(actions) -> <<"No RPC actions in schema.">>.
 
 tree_label(config) -> <<"Configuration">>;
-tree_label(oper) -> <<"Operational state">>.
+tree_label(oper) -> <<"Operational state">>;
+tree_label(actions) -> <<"Actions">>.
 
 empty_hint(config) -> <<"Select a configuration node.">>;
-empty_hint(oper) -> <<"Select an operational node.">>.
+empty_hint(oper) -> <<"Select an operational node.">>;
+empty_hint(actions) -> <<"Select an action.">>.
 
-wrong_mode_msg(config) -> <<"This node is operational.">>;
-wrong_mode_msg(oper) -> <<"This node is configuration.">>.
+wrong_mode_target_msg(actions) -> <<"This node is an action.">>;
+wrong_mode_target_msg(oper) -> <<"This node is operational.">>;
+wrong_mode_target_msg(config) -> <<"This node is configuration.">>.
 
 other_mode_link(config) -> <<"Open in Config">>;
-other_mode_link(oper) -> <<"Open in Operational">>.
+other_mode_link(oper) -> <<"Open in Operational">>;
+other_mode_link(actions) -> <<"Open in Actions">>.
 
 render_mode_switch(View, Path, Mods, Mode) ->
     ConfigPath = switch_path(Path, Mods, config),
     OperPath = switch_path(Path, Mods, oper),
+    ActionsPath = switch_path(Path, Mods, actions),
+    ShowActions = has_rpcs(Mods) orelse Mode =:= actions,
     tpl(mgmtd_ui_mode_switch_dtl,
         [{mode_config, Mode =:= config},
          {mode_oper, Mode =:= oper},
+         {mode_actions, Mode =:= actions},
+         {show_actions, ShowActions},
          {config_href, loc(View, ConfigPath, config)},
-         {oper_href, loc(View, OperPath, oper)}]).
+         {oper_href, loc(View, OperPath, oper)},
+         {actions_href, loc(View, ActionsPath, actions)}]).
 
 switch_path(Path, Mods, Mode) ->
     case find_node(Path, filter_modules(Mods, Mode)) of
@@ -435,9 +529,9 @@ switch_path(Path, Mods, Mode) ->
 %% Pane / values
 %%--------------------------------------------------------------------
 
-render_pane(undefined, <<>>, _Errors, _Draft, _View, Mode, _Mods) ->
+render_pane(undefined, <<>>, _Errors, _Draft, _View, Mode, _Mods, _RpcOut) ->
     tpl(mgmtd_ui_pane_dtl, empty_pane(Mode));
-render_pane(undefined, Path, Errors, _Draft, View, Mode, Mods) ->
+render_pane(undefined, Path, Errors, _Draft, View, Mode, Mods, _RpcOut) ->
     case find_node(Path, Mods) of
         undefined ->
             Vars = [{has_selection, true},
@@ -453,17 +547,32 @@ render_pane(undefined, Path, Errors, _Draft, View, Mode, Mods) ->
             tpl(mgmtd_ui_pane_dtl,
                 put_text(Vars, write_error, maps:get(<<"page">>, Errors, undefined)));
         _Raw ->
-            Other = other_mode(Mode),
+            Target = infer_mode(Path, Mods),
             Vars = [{has_selection, false},
                     {wrong_mode, true},
                     {read_only, false},
                     {empty_hint, <<>>},
-                    {wrong_mode_msg, wrong_mode_msg(Mode)},
-                    {other_href, loc(View, Path, Other)},
-                    {other_link, other_mode_link(Other)}],
+                    {wrong_mode_msg, wrong_mode_target_msg(Target)},
+                    {other_href, loc(View, Path, Target)},
+                    {other_link, other_mode_link(Target)}],
             tpl(mgmtd_ui_pane_dtl, Vars)
     end;
-render_pane(Node, _Path, Errors, Draft, View, Mode, _Mods) ->
+render_pane(#{<<"kind">> := <<"rpc">>} = Node, _Path, Errors, Draft, View, Mode,
+            _Mods, RpcOutput) ->
+    Return = maps:get(<<"path">>, Node),
+    ValueHtml = render_rpc(Node, Return, Errors, Draft, View, Mode, RpcOutput),
+    Vars = [{has_selection, true},
+            {wrong_mode, false},
+            {read_only, false},
+            {name, maps:get(<<"name">>, Node)},
+            {kind, maps:get(<<"kind">>, Node)},
+            {config, false},
+            {path, Return},
+            {empty_hint, <<>>},
+            {value_html, html(ValueHtml)}],
+    Vars1 = put_text(Vars, desc, nonempty(maps:get(<<"desc">>, Node, undefined))),
+    tpl(mgmtd_ui_pane_dtl, Vars1);
+render_pane(Node, _Path, Errors, Draft, View, Mode, _Mods, _RpcOut) ->
     Etag = mgmtd_restconf_data:etag_value(),
     Return = maps:get(<<"path">>, Node),
     {LoadErr, Value} = load_value(Node, Mode),
@@ -536,8 +645,43 @@ render_value(Node, Value, ResourcePath, Return, Etag, Errors, Draft, View, Mode)
             render_list(Node, Value, Return, Etag, Errors, Draft, View, Mode);
         <<"container">> ->
             render_container(Node, Value, ResourcePath, Return, Etag, Errors, Draft, View, Mode);
+        <<"rpc">> ->
+            render_rpc(Node, Return, Errors, Draft, View, Mode, undefined);
         _ ->
             <<>>
+    end.
+
+render_rpc(Node, Return, Errors, Draft, View, Mode, RpcOutput) ->
+    InputNode = rpc_io_node(Node, <<"input">>),
+    InputKids = maps:get(<<"children">>, InputNode, []),
+    DraftHtml = render_form_draft(InputNode, <<"input">>, Draft, Errors),
+    Vars = [{ui_base, ?UI_BASE},
+            {path, maps:get(<<"path">>, Node)},
+            {return_path, Return},
+            {view, View},
+            {mode, mode_bin(Mode)},
+            {has_input, InputKids =/= []},
+            {draft_html, html(DraftHtml)},
+            {has_output, RpcOutput =/= undefined},
+            {output_empty, RpcOutput =:= empty}] ++ rpc_output_vars(Node, RpcOutput),
+    tpl(mgmtd_ui_rpc_dtl, put_text(Vars, invoke_error, maps:get(<<"page">>, Errors, undefined))).
+
+rpc_output_vars(_Node, undefined) ->
+    [{output_fields, []}];
+rpc_output_vars(_Node, empty) ->
+    [{output_fields, []}];
+rpc_output_vars(Node, Value) ->
+    OutputNode = rpc_io_node(Node, <<"output">>),
+    Kids = maps:get(<<"children">>, OutputNode, []),
+    case Kids of
+        [] ->
+            [{output_fields, []},
+             {output_json, iolist_to_binary(mgmtd_json:encode(Value))}];
+        _ ->
+            [{output_fields,
+              [[{label, maps:get(<<"name">>, C)},
+                {display, format_scalar(child_value(Value, C))}]
+               || C <- Kids]}]
     end.
 
 render_leaf(Node, Value, ResourcePath, Return, Etag, Errors, View, Mode) ->
@@ -640,15 +784,20 @@ nested_block(Child, Val, ResourcePath, Return, Etag, Errors, View, Mode) ->
 %%--------------------------------------------------------------------
 
 render_draft(Node, Prefix, Draft, Errors) ->
-    [render_draft_field(F, Prefix, Draft, Errors) || F <- draft_fields(Node)].
+    [render_draft_field(F, Prefix, Draft, Errors, fun render_draft/4)
+     || F <- draft_fields(Node)].
 
-render_draft_field(Field, Prefix, Draft, Errors) ->
+render_form_draft(Node, Prefix, Draft, Errors) ->
+    [render_draft_field(F, Prefix, Draft, Errors, fun render_form_draft/4)
+     || F <- all_form_fields(Node)].
+
+render_draft_field(Field, Prefix, Draft, Errors, NestedFun) ->
     Name = maps:get(<<"name">>, Field),
     InputName = <<Prefix/binary, $., Name/binary>>,
     case maps:get(<<"kind">>, Field) of
         <<"container">> ->
             Nested = as_map(nested_get(Draft, Name)),
-            Children = render_draft(Field, InputName, Nested, Errors),
+            Children = NestedFun(Field, InputName, Nested, Errors),
             tpl(mgmtd_ui_draft_field_dtl,
                 [{is_container, true},
                  {label, Name},
@@ -668,8 +817,13 @@ render_draft_field(Field, Prefix, Draft, Errors) ->
     end.
 
 draft_fields(Node) ->
+    form_fields(Node, config_children(Node)).
+
+all_form_fields(Node) ->
+    form_fields(Node, maps:get(<<"children">>, Node, [])).
+
+form_fields(Node, Kids) ->
     Keys = maps:get(<<"key_names">>, Node, []),
-    Kids = config_children(Node),
     KeyNodes = [C || K <- Keys, C <- [find_child(Node, K)], C =/= undefined],
     RestLeaves = [C || C <- Kids,
                        is_leafish(C),
@@ -708,11 +862,14 @@ default_draft(Node) ->
 %%--------------------------------------------------------------------
 
 build_item(Node, Draft, Prefix) ->
-    build_kids(draft_fields(Node), Node, as_map(Draft), Prefix, #{}).
+    build_kids(draft_fields(Node), Node, as_map(Draft), Prefix, #{}, fun build_item/3).
 
-build_kids([], _Node, _Draft, _Prefix, Acc) ->
+build_all(Node, Draft, Prefix) ->
+    build_kids(all_form_fields(Node), Node, as_map(Draft), Prefix, #{}, fun build_all/3).
+
+build_kids([], _Node, _Draft, _Prefix, Acc, _NestedFun) ->
     {ok, Acc};
-build_kids([C | Rest], Node, Draft, Prefix, Acc) ->
+build_kids([C | Rest], Node, Draft, Prefix, Acc, NestedFun) ->
     Name = maps:get(<<"name">>, C),
     Json = maps:get(<<"json_name">>, C),
     InputName = <<Prefix/binary, $., Name/binary>>,
@@ -720,13 +877,13 @@ build_kids([C | Rest], Node, Draft, Prefix, Acc) ->
     case maps:get(<<"kind">>, C) of
         <<"container">> ->
             NestedDraft = as_map(nested_get(Draft, Name)),
-            case build_item(C, NestedDraft, InputName) of
+            case NestedFun(C, NestedDraft, InputName) of
                 {error, _} = Err ->
                     Err;
                 {ok, Nested} when map_size(Nested) =:= 0 ->
-                    build_kids(Rest, Node, Draft, Prefix, Acc);
+                    build_kids(Rest, Node, Draft, Prefix, Acc, NestedFun);
                 {ok, Nested} ->
-                    build_kids(Rest, Node, Draft, Prefix, Acc#{Json => Nested})
+                    build_kids(Rest, Node, Draft, Prefix, Acc#{Json => Nested}, NestedFun)
             end;
         <<"leaf-list">> ->
             Raw = to_bin(nested_get(Draft, Name)),
@@ -736,10 +893,10 @@ build_kids([C | Rest], Node, Draft, Prefix, Acc) ->
                 {ok, []} ->
                     case required(C, Keys) of
                         true -> {error, #{InputName => <<"required">>}};
-                        false -> build_kids(Rest, Node, Draft, Prefix, Acc)
+                        false -> build_kids(Rest, Node, Draft, Prefix, Acc, NestedFun)
                     end;
                 {ok, List} ->
-                    build_kids(Rest, Node, Draft, Prefix, Acc#{Json => List})
+                    build_kids(Rest, Node, Draft, Prefix, Acc#{Json => List}, NestedFun)
             end;
         <<"leaf">> ->
             Raw = string:trim(to_bin(nested_get(Draft, Name))),
@@ -747,18 +904,18 @@ build_kids([C | Rest], Node, Draft, Prefix, Acc) ->
                 <<>> ->
                     case required(C, Keys) of
                         true -> {error, #{InputName => <<"required">>}};
-                        false -> build_kids(Rest, Node, Draft, Prefix, Acc)
+                        false -> build_kids(Rest, Node, Draft, Prefix, Acc, NestedFun)
                     end;
                 _ ->
                     case parse_snapshot_leaf(C, Raw) of
                         {error, Msg} ->
                             {error, #{InputName => Msg}};
                         {ok, Val} ->
-                            build_kids(Rest, Node, Draft, Prefix, Acc#{Json => Val})
+                            build_kids(Rest, Node, Draft, Prefix, Acc#{Json => Val}, NestedFun)
                     end
             end;
         _ ->
-            build_kids(Rest, Node, Draft, Prefix, Acc)
+            build_kids(Rest, Node, Draft, Prefix, Acc, NestedFun)
     end.
 
 required(C, Keys) ->
@@ -846,11 +1003,18 @@ parse_number(Name, Bin) ->
     end.
 
 collect_item(Qs) ->
+    collect_prefixed(Qs, <<"item.">>).
+
+collect_prefixed(Qs, Prefix) ->
+    Sz = byte_size(Prefix),
     lists:foldl(
-      fun({<<"item.", Rest/binary>>, Val}, Acc) ->
-              put_dotted(Acc, binary:split(Rest, <<".">>, [global]), Val);
-         (_, Acc) ->
-              Acc
+      fun({Key, Val}, Acc) ->
+              case Key of
+                  <<P:Sz/binary, Rest/binary>> when P =:= Prefix ->
+                      put_dotted(Acc, binary:split(Rest, <<".">>, [global]), Val);
+                  _ ->
+                      Acc
+              end
       end, #{}, Qs).
 
 put_dotted(Map, [K], Val) ->

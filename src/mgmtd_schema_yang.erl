@@ -19,7 +19,8 @@
                             nodes := [#container{} | #list{} | #leaf{} | #leaf_list{}
                                       | #rpc{} | #action{} | #notification{}],
                             identities => [map()],
-                            remote_augments => [map()]}.
+                            remote_augments => [map()],
+                            callback => atom()}.
 
 -spec load_file(file:filename()) -> ok | {error, term()}.
 load_file(File) ->
@@ -106,7 +107,8 @@ compile([{module, _Ln, Name0, Body}], Opts) ->
                                            yang_version => maps:get(yang_version, Header, <<"1">>),
                                            nodes => Nodes,
                                            identities => Ids,
-                                           remote_augments => Remote}}
+                                           remote_augments => Remote,
+                                           callback => node_data_callback(Merged, Ctx1)}}
                             end
                     end
             end
@@ -193,7 +195,11 @@ load_compiled(Compiled, Opts) ->
     TopNames = [node_name(N) || N <- Nodes],
     case mgmtd_schema:prepare_load(LoadOpts, yang, TopNames) of
         {ok, Prefix1, Namespace} ->
-            Callback = maps:get(callback, Opts, undefined),
+            YangCb = maps:get(callback, Compiled, undefined),
+            Callback = case maps:get(callback, Opts, undefined) of
+                           undefined -> YangCb;
+                           Cb -> Cb
+                       end,
             case Nodes of
                 [] ->
                     ok;
@@ -543,7 +549,7 @@ expand_uses(Ln, Arg, UsesSub, Ctx) ->
                                 {ok, Nodes0} ->
                                     Refines = [{refine, RLn, P, I}
                                                || {refine, RLn, P, I} <- UsesSub],
-                                    case apply_refines(Nodes0, Refines) of
+                                    case apply_refines(Nodes0, Refines, Ctx) of
                                         {error, _} = Err ->
                                             Err;
                                         {ok, Nodes1} ->
@@ -551,7 +557,7 @@ expand_uses(Ln, Arg, UsesSub, Ctx) ->
                                                 {error, _} = Err ->
                                                     Err;
                                                 {ok, Nodes2} ->
-                                                    {ok, propagate_uses_opts(Nodes2, UsesSub)}
+                                                    {ok, propagate_uses_opts(Nodes2, UsesSub, Ctx)}
                                             end
                                     end
                             end
@@ -578,8 +584,9 @@ compile_node_feature(container, _Ln, Arg, Sub, Ctx) ->
                     {ok, #container{name = arg_str(Arg),
                                     desc = find_desc(Sub),
                                     config = Config,
+                                    data_callback = node_data_callback(Sub, Ctx),
                                     children = fun() -> Children end,
-                                    opts = node_opts(Sub)}};
+                                    opts = node_opts(Sub, Ctx)}};
                 Error ->
                     Error
             end
@@ -604,8 +611,9 @@ compile_node_feature(list, Ln, Arg, Sub, Ctx) ->
                                        max_elements = max_elements(Sub),
                                        ordered_by = ordered_by_of(Sub),
                                        config = Config,
+                                       data_callback = node_data_callback(Sub, Ctx),
                                        children = fun() -> Children end,
-                                       opts = node_opts(Sub)}}
+                                       opts = node_opts(Sub, Ctx)}}
                     end;
                 Error ->
                     Error
@@ -625,7 +633,8 @@ compile_node_feature(leaf, Ln, Arg, Sub, Ctx) ->
                                default = Default,
                                mandatory = is_true(find_arg(mandatory, Sub)),
                                config = Config,
-                               opts = node_opts(Sub)}};
+                               data_callback = node_data_callback(Sub, Ctx),
+                               opts = node_opts(Sub, Ctx)}};
                 Error ->
                     prepend_error(Error, Ln, Arg)
             end
@@ -641,10 +650,11 @@ compile_node_feature('leaf-list', Ln, Arg, Sub, Ctx) ->
                                     type = Type,
                                     desc = find_desc(Sub),
                                     config = Config,
+                                    data_callback = node_data_callback(Sub, Ctx),
                                     min_elements = min_elements(Sub),
                                     max_elements = max_elements(Sub),
                                     ordered_by = ordered_by_of(Sub),
-                                    opts = node_opts(Sub)}};
+                                    opts = node_opts(Sub, Ctx)}};
                 Error ->
                     prepend_error(Error, Ln, Arg)
             end
@@ -662,9 +672,10 @@ compile_rpc(_Ln, Arg, Sub, Ctx) ->
                 {ok, Input, Output} ->
                     {ok, #rpc{name = arg_str(Arg),
                               desc = find_desc(Sub),
+                              callback = node_data_callback(Sub, Ctx),
                               input = fun() -> Input end,
                               output = fun() -> Output end,
-                              opts = node_opts(Sub)}}
+                              opts = node_opts(Sub, Ctx)}}
             end
     end.
 
@@ -679,9 +690,10 @@ compile_action(_Ln, Arg, Sub, Ctx) ->
                 {ok, Input, Output} ->
                     {ok, #action{name = arg_str(Arg),
                                  desc = find_desc(Sub),
+                                 callback = node_data_callback(Sub, Ctx),
                                  input = fun() -> Input end,
                                  output = fun() -> Output end,
-                                 opts = node_opts(Sub)}}
+                                 opts = node_opts(Sub, Ctx)}}
             end
     end.
 
@@ -698,7 +710,7 @@ compile_notification(_Ln, Arg, Sub, Ctx) ->
                     {ok, #notification{name = arg_str(Arg),
                                        desc = find_desc(Sub),
                                        children = fun() -> Children end,
-                                       opts = node_opts(Sub)}}
+                                       opts = node_opts(Sub, Ctx)}}
             end
     end.
 
@@ -731,13 +743,13 @@ prepend_error({error, Reason}, Ln, Arg) ->
 %% Refine (applied to compiled records after grouping expansion)
 %%--------------------------------------------------------------------
 
-apply_refines(Nodes, []) ->
+apply_refines(Nodes, [], _Ctx) ->
     {ok, Nodes};
-apply_refines(Nodes, [{refine, Ln, Path, Items} | Rest]) ->
+apply_refines(Nodes, [{refine, Ln, Path, Items} | Rest], Ctx) ->
     Ids = schema_id_path(arg_str(Path)),
-    case refine_walk(Nodes, Ids, Items, Ln, arg_str(Path)) of
+    case refine_walk(Nodes, Ids, Items, Ln, arg_str(Path), Ctx) of
         {ok, Nodes1} ->
-            apply_refines(Nodes1, Rest);
+            apply_refines(Nodes1, Rest, Ctx);
         Error ->
             Error
     end.
@@ -751,15 +763,15 @@ local_id(Id) ->
         [Name] -> Name
     end.
 
-refine_walk(_Nodes, [], _Items, Ln, Path) ->
+refine_walk(_Nodes, [], _Items, Ln, Path, _Ctx) ->
     {error, {Ln, refine_not_found, Path}};
-refine_walk(Nodes, [Id], Items, Ln, Path) ->
-    case replace_named(Nodes, Id, fun(N) -> refine_node(N, Items) end) of
+refine_walk(Nodes, [Id], Items, Ln, Path, Ctx) ->
+    case replace_named(Nodes, Id, fun(N) -> refine_node(N, Items, Ctx) end) of
         {ok, Nodes1} -> {ok, Nodes1};
         not_found -> {error, {Ln, refine_not_found, Path}}
     end;
-refine_walk(Nodes, [Id | Rest], Items, Ln, Path) ->
-    case replace_named(Nodes, Id, fun(N) -> refine_children(N, Rest, Items, Ln, Path) end) of
+refine_walk(Nodes, [Id | Rest], Items, Ln, Path, Ctx) ->
+    case replace_named(Nodes, Id, fun(N) -> refine_children(N, Rest, Items, Ln, Path, Ctx) end) of
         {ok, Nodes1} -> {ok, Nodes1};
         not_found -> {error, {Ln, refine_not_found, Path}}
     end.
@@ -786,41 +798,45 @@ replace_named([N | Ns], Id, Fun, Acc, Found) ->
             replace_named(Ns, Id, Fun, [N | Acc], Found)
     end.
 
-refine_children(#container{children = Ch} = N, Rest, Items, Ln, Path) ->
-    case refine_walk(Ch(), Rest, Items, Ln, Path) of
+refine_children(#container{children = Ch} = N, Rest, Items, Ln, Path, Ctx) ->
+    case refine_walk(Ch(), Rest, Items, Ln, Path, Ctx) of
         {ok, Ch1} -> N#container{children = fun() -> Ch1 end};
         Err -> Err
     end;
-refine_children(#list{children = Ch} = N, Rest, Items, Ln, Path) ->
-    case refine_walk(Ch(), Rest, Items, Ln, Path) of
+refine_children(#list{children = Ch} = N, Rest, Items, Ln, Path, Ctx) ->
+    case refine_walk(Ch(), Rest, Items, Ln, Path, Ctx) of
         {ok, Ch1} -> N#list{children = fun() -> Ch1 end};
         Err -> Err
     end;
-refine_children(_Other, _Rest, _Items, Ln, Path) ->
+refine_children(_Other, _Rest, _Items, Ln, Path, _Ctx) ->
     {error, {Ln, refine_not_found, Path}}.
 
-refine_node(#leaf{} = N, Items) ->
+refine_node(#leaf{} = N, Items, Ctx) ->
     N#leaf{desc = refine_desc(Items, N#leaf.desc),
            default = refine_default(Items, N#leaf.default, N#leaf.type),
            mandatory = refine_bool(mandatory, Items, N#leaf.mandatory),
            config = refine_bool(config, Items, N#leaf.config),
-           opts = refine_merge_opts(Items, N#leaf.opts)};
-refine_node(#leaf_list{} = N, Items) ->
+           data_callback = refine_data_callback(Items, N#leaf.data_callback, Ctx),
+           opts = refine_merge_opts(Items, N#leaf.opts, Ctx)};
+refine_node(#leaf_list{} = N, Items, Ctx) ->
     N#leaf_list{desc = refine_desc(Items, N#leaf_list.desc),
                 min_elements = refine_min(Items, N#leaf_list.min_elements),
                 max_elements = refine_max(Items, N#leaf_list.max_elements),
                 config = refine_bool(config, Items, N#leaf_list.config),
-                opts = refine_merge_opts(Items, N#leaf_list.opts)};
-refine_node(#list{} = N, Items) ->
+                data_callback = refine_data_callback(Items, N#leaf_list.data_callback, Ctx),
+                opts = refine_merge_opts(Items, N#leaf_list.opts, Ctx)};
+refine_node(#list{} = N, Items, Ctx) ->
     N#list{desc = refine_desc(Items, N#list.desc),
            min_elements = refine_min(Items, N#list.min_elements),
            max_elements = refine_max(Items, N#list.max_elements),
            config = refine_bool(config, Items, N#list.config),
-           opts = refine_merge_opts(Items, N#list.opts)};
-refine_node(#container{} = N, Items) ->
+           data_callback = refine_data_callback(Items, N#list.data_callback, Ctx),
+           opts = refine_merge_opts(Items, N#list.opts, Ctx)};
+refine_node(#container{} = N, Items, Ctx) ->
     N#container{desc = refine_desc(Items, N#container.desc),
                 config = refine_bool(config, Items, N#container.config),
-                opts = refine_merge_opts(Items, N#container.opts)}.
+                data_callback = refine_data_callback(Items, N#container.data_callback, Ctx),
+                opts = refine_merge_opts(Items, N#container.opts, Ctx)}.
 
 refine_desc(Items, Default) ->
     case find_arg(description, Items) of
@@ -855,18 +871,45 @@ refine_max(Items, Default) ->
         N -> arg_int(N)
     end.
 
-refine_merge_opts(Items, Opts) ->
+refine_merge_opts(Items, Opts, Ctx) ->
     Extra = lists:flatten([must_opts(Items), when_opt(Items),
                            unique_opt(Items), presence_opt(Items),
-                           if_feature_opt(Items)]),
+                           if_feature_opt(Items),
+                           mgmtd_opts(Items, Ctx)]),
     Extra ++ Opts.
 
-propagate_uses_opts(Nodes, UsesSub) ->
-    Extra = lists:flatten([when_opt(UsesSub), if_feature_opt(UsesSub)]),
-    case Extra of
-        [] -> Nodes;
-        _ -> [add_opts(N, Extra) || N <- Nodes]
+refine_data_callback(Items, Default, Ctx) ->
+    case node_data_callback(Items, Ctx) of
+        undefined -> Default;
+        Cb -> Cb
     end.
+
+propagate_uses_opts(Nodes, UsesSub, Ctx) ->
+    Extra = lists:flatten([when_opt(UsesSub), if_feature_opt(UsesSub),
+                           mgmtd_opts(UsesSub, Ctx)]),
+    Cb = node_data_callback(UsesSub, Ctx),
+    case {Extra, Cb} of
+        {[], undefined} -> Nodes;
+        _ -> [apply_uses_ext(N, Extra, Cb) || N <- Nodes]
+    end.
+
+apply_uses_ext(Node, Extra, Cb) ->
+    set_cb_if_unset(add_opts(Node, Extra), Cb).
+
+set_cb_if_unset(#container{data_callback = undefined} = N, Cb) when Cb =/= undefined ->
+    N#container{data_callback = Cb};
+set_cb_if_unset(#list{data_callback = undefined} = N, Cb) when Cb =/= undefined ->
+    N#list{data_callback = Cb};
+set_cb_if_unset(#leaf{data_callback = undefined} = N, Cb) when Cb =/= undefined ->
+    N#leaf{data_callback = Cb};
+set_cb_if_unset(#leaf_list{data_callback = undefined} = N, Cb) when Cb =/= undefined ->
+    N#leaf_list{data_callback = Cb};
+set_cb_if_unset(#rpc{callback = undefined} = N, Cb) when Cb =/= undefined ->
+    N#rpc{callback = Cb};
+set_cb_if_unset(#action{callback = undefined} = N, Cb) when Cb =/= undefined ->
+    N#action{callback = Cb};
+set_cb_if_unset(N, _) ->
+    N.
 
 add_opts(#container{opts = O} = N, Extra) -> N#container{opts = Extra ++ O};
 add_opts(#list{opts = O} = N, Extra) -> N#list{opts = Extra ++ O};
@@ -1007,7 +1050,7 @@ compile_augment_body(Sub, Ctx) ->
         {error, _} = Err ->
             Err;
         {ok, Nodes} ->
-            {ok, propagate_uses_opts(Nodes, Sub)}
+            {ok, propagate_uses_opts(Nodes, Sub, Ctx)}
     end.
 
 is_local_target(Steps, Ctx) ->
@@ -1641,13 +1684,62 @@ if_primary(_) ->
 %% opts / extras kept for later XPath and constraints
 %%--------------------------------------------------------------------
 
-node_opts(Sub) ->
+node_opts(Sub, Ctx) ->
     lists:flatten([must_opts(Sub),
                    when_opt(Sub),
                    unique_opt(Sub),
                    presence_opt(Sub),
                    pattern_opt(Sub),
-                   if_feature_opt(Sub)]).
+                   if_feature_opt(Sub),
+                   mgmtd_opts(Sub, Ctx)]).
+
+%%--------------------------------------------------------------------
+%% mgmtd extensions (`import mgmtd { prefix mgmtd; }`)
+%%
+%% Known: data-callback (record field), codec (`{codec, Mod}` in opts).
+%% Other `mgmtd:*` statements are kept as `{mgmtd, Name, Arg}` in opts.
+%% The well-known prefix `mgmtd` is accepted even without an import.
+%%--------------------------------------------------------------------
+
+node_data_callback(Sub, Ctx) ->
+    case mgmtd_ext_arg(<<"data-callback">>, Sub, Ctx) of
+        undefined -> undefined;
+        [] -> undefined;
+        Arg -> arg_atom(Arg)
+    end.
+
+mgmtd_opts(Sub, Ctx) ->
+    lists:append([mgmtd_opt(Name, Arg)
+                  || {{Pfx, Name}, _, Arg, _} <- Sub,
+                     is_mgmtd_prefix(Pfx, Ctx)]).
+
+mgmtd_opt(<<"data-callback">>, _Arg) ->
+    [];
+mgmtd_opt(<<"codec">>, Arg) ->
+    case Arg of
+        [] -> [];
+        _ -> [{codec, arg_atom(Arg)}]
+    end;
+mgmtd_opt(Name, Arg) ->
+    [{mgmtd, arg_atom(Name), arg_str(Arg)}].
+
+mgmtd_ext_arg(Name, Sub, Ctx) ->
+    case [Arg || {{Pfx, N}, _, Arg, _} <- Sub,
+                 N =:= Name,
+                 is_mgmtd_prefix(Pfx, Ctx)] of
+        [Arg | _] -> Arg;
+        [] -> undefined
+    end.
+
+is_mgmtd_prefix(Pfx, Ctx) when is_binary(Pfx) ->
+    Pfx =:= <<"mgmtd">> orelse
+        lists:member(Pfx, imported_mgmtd_prefixes(Ctx));
+is_mgmtd_prefix(_, _) ->
+    false.
+
+imported_mgmtd_prefixes(Ctx) ->
+    [Pfx || {Pfx, Imp} <- maps:to_list(maps:get(imports, Ctx, #{})),
+            maps:get(name, Imp, undefined) =:= <<"mgmtd">>].
 
 %% RFC 7950 §7.7.5 / §7.8.7. Default is system. Only `user` is special.
 ordered_by_of(Sub) ->
@@ -1744,6 +1836,10 @@ arg_int(L) when is_list(L) -> list_to_integer(L).
 prefix_atom(A) when is_atom(A) -> A;
 prefix_atom(B) when is_binary(B) -> binary_to_atom(B, utf8);
 prefix_atom(L) when is_list(L) -> list_to_atom(L).
+
+arg_atom(A) when is_atom(A) -> A;
+arg_atom(B) when is_binary(B) -> binary_to_atom(B, utf8);
+arg_atom(L) when is_list(L) -> list_to_atom(L).
 
 node_name(#container{name = N}) -> N;
 node_name(#list{name = N}) -> N;

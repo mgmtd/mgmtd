@@ -52,7 +52,8 @@ start() ->
 %% For operational data provide a module that implements the
 %% `mgmtd_provider` behaviour (`get_value` / `get_first` / `get_next`).
 %% Set it as `data_callback` on the function-schema node (inherited by
-%% descendants) or as `callback => Module` at JSON load time.
+%% descendants), as `callback => Module` at JSON load time, or as
+%% `mgmtd:data-callback "Module"` in a YANG module.
 %%
 %% Options:
 %% config => true | false (default false)
@@ -85,13 +86,24 @@ load_function_schema(Fun, Opts) ->
 %% Prefix defaults to the module `prefix` statement; namespace is the
 %% module URI. Override with `#{prefix => Atom}`.
 %%
+%% Host modules are named in the YANG with mgmtd extensions
+%% (`import mgmtd { prefix mgmtd; }` from `priv/yang/mgmtd.yang`):
+%%
+%%   mgmtd:data-callback "example_provider";  %% mgmtd_provider / mgmtd_rpc
+%%   mgmtd:codec "example_codec_logger";      %% `{codec, Mod}` in opts
+%%
+%% `data-callback` may sit on a node (inherited by descendants) or at
+%% module level as the default. Other `mgmtd:*` statements are kept as
+%% `{mgmtd, Name, Arg}` in schema `opts`.
+%%
 %% Options:
 %%   prefix => atom()
 %%   namespace => URI::string()
 %%   search_path => [Dir]     %% plus the file's directory and priv/yang
 %%   features => all | none | [Name] | #{Module => [Name]}
 %%               default `all` (keep if-feature nodes)
-%%   callback => Module
+%%   callback => Module       %% overrides a module-level data-callback;
+%%                            %% a node-level statement always wins
 load_yang_module(File) ->
     mgmtd_schema:load_yang_schema_file(File, #{}).
 load_yang_module(File, Opts) when is_map(Opts) ->

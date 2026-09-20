@@ -1,0 +1,49 @@
+module mgmtd {
+
+  yang-version 1.1;
+
+  namespace "urn:mgmtd:yang";
+  prefix mgmtd;
+
+  organization
+    "mgmtd";
+
+  description
+    "mgmtd-specific YANG extensions.
+
+     Import this module and use the prefixed statements on schema
+     nodes (or at module level) the same way a function schema sets
+     record fields such as `data_callback` and `{codec, Mod}` in opts.
+
+     Descendants inherit `data-callback` unless they name their own.";
+
+  revision 2026-09-20 {
+    description
+      "Initial revision: data-callback and codec.";
+  }
+
+  extension data-callback {
+    argument module;
+    description
+      "Erlang module that serves this node.
+
+       On `config false` data nodes the module implements
+       `mgmtd_provider` (`get_value` / `get_first` / `get_next`).
+       On `rpc` / `action` it implements `mgmtd_rpc` (`invoke/2`).
+
+       Same as the function-schema `data_callback` field (or
+       `#rpc.callback`) and the load-option `callback => Module`.
+
+       May be stated at module level as the default for nodes that
+       do not set their own. A load-option `callback` overrides the
+       module-level default; a node-level statement always wins.";
+  }
+
+  extension codec {
+    argument module;
+    description
+      "Erlang module implementing `mgmtd_codec` for this subtree
+       (sys.config backend term adapter). Same as `{codec, Module}`
+       in function-schema `opts`.";
+  }
+}

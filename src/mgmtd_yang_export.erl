@@ -17,8 +17,10 @@
 
 -define(INET, "ietf-inet-types").
 -define(YANG, "ietf-yang-types").
+-define(MGMTD, "mgmtd").
 -define(INET_REV, "2013-07-15").
 -define(YANG_REV, "2013-07-15").
+-define(MGMTD_REV, "2026-09-20").
 
 -spec text(string() | binary()) -> {ok, binary()} | {error, not_found}.
 text(Name) ->
@@ -101,7 +103,7 @@ find_stdlib(Name, Rev) ->
 
 -spec stdlib_modules() -> [map()].
 stdlib_modules() ->
-    [Info || {ok, Info} <- [stdlib(?INET), stdlib(?YANG)]].
+    [Info || {ok, Info} <- [stdlib(?INET), stdlib(?YANG), stdlib(?MGMTD)]].
 
 stdlib(?INET) ->
     stdlib_info(?INET, ?INET_REV, "urn:ietf:params:xml:ns:yang:ietf-inet-types",
@@ -109,6 +111,8 @@ stdlib(?INET) ->
 stdlib(?YANG) ->
     stdlib_info(?YANG, ?YANG_REV, "urn:ietf:params:xml:ns:yang:ietf-yang-types",
                 "ietf-yang-types.yang");
+stdlib(?MGMTD) ->
+    stdlib_info(?MGMTD, ?MGMTD_REV, "urn:mgmtd:yang", "mgmtd.yang");
 stdlib(_) ->
     error.
 
@@ -343,8 +347,9 @@ emit_node(#{node_type := container} = N, Prefix, Module, Ind, Acc) ->
     Path = maps:get(path, N),
     {KidsTxt, Acc1} = emit_nodes(own_children(Prefix, Path, Module),
                                  Prefix, Module, Ind + 1, Acc),
+    {ExtTxt, Acc2} = mgmtd_ext_stmts(N, Ind + 1, Acc1),
     {block(Ind, "container", maps:get(name, N),
-           node_body(N, Ind + 1) ++ KidsTxt), Acc1};
+           node_body(N, Ind + 1) ++ ExtTxt ++ KidsTxt), Acc2};
 emit_node(#{node_type := list} = N, Prefix, Module, Ind, Acc) ->
     Path = maps:get(path, N),
     Keys = maps:get(key_names, N, []),
@@ -355,17 +360,20 @@ emit_node(#{node_type := list} = N, Prefix, Module, Ind, Acc) ->
                   _ -> [pad(Ind + 1), "key ", quote_str(string:join(Keys, " ")), ";\n"]
               end,
     Extra = list_extras(N, Ind + 1),
+    {ExtTxt, Acc2} = mgmtd_ext_stmts(N, Ind + 1, Acc1),
     {block(Ind, "list", maps:get(name, N),
-           node_body(N, Ind + 1) ++ KeyStmt ++ Extra ++ KidsTxt), Acc1};
+           node_body(N, Ind + 1) ++ KeyStmt ++ Extra ++ ExtTxt ++ KidsTxt), Acc2};
 emit_node(#{node_type := leaf} = N, _Prefix, _Module, Ind, Acc) ->
     {TypeTxt, Acc1} = emit_type(maps:get(type, N, string), N, Ind + 1, Acc),
+    {ExtTxt, Acc2} = mgmtd_ext_stmts(N, Ind + 1, Acc1),
     {block(Ind, "leaf", maps:get(name, N),
-           node_body(N, Ind + 1) ++ TypeTxt ++ default_stmt(N, Ind + 1)), Acc1};
+           node_body(N, Ind + 1) ++ TypeTxt ++ default_stmt(N, Ind + 1) ++ ExtTxt), Acc2};
 emit_node(#{node_type := leaf_list} = N, _Prefix, _Module, Ind, Acc) ->
     {TypeTxt, Acc1} = emit_type(maps:get(type, N, string), N, Ind + 1, Acc),
     Extra = list_extras(N, Ind + 1),
+    {ExtTxt, Acc2} = mgmtd_ext_stmts(N, Ind + 1, Acc1),
     {block(Ind, "leaf-list", maps:get(name, N),
-           node_body(N, Ind + 1) ++ TypeTxt ++ Extra), Acc1};
+           node_body(N, Ind + 1) ++ TypeTxt ++ Extra ++ ExtTxt), Acc2};
 emit_node(#{node_type := rpc} = N, Prefix, Module, Ind, Acc) ->
     emit_rpc_like("rpc", N, Prefix, Module, Ind, Acc);
 emit_node(#{node_type := action} = N, Prefix, Module, Ind, Acc) ->
@@ -384,8 +392,9 @@ emit_rpc_like(Kind, N, Prefix, Module, Ind, Acc) ->
     Kids = own_children(Prefix, Path, Module),
     {InTxt, Acc1} = emit_io("input", find_named(Kids, "input"), Prefix, Module, Ind + 1, Acc),
     {OutTxt, Acc2} = emit_io("output", find_named(Kids, "output"), Prefix, Module, Ind + 1, Acc1),
+    {ExtTxt, Acc3} = mgmtd_ext_stmts(N, Ind + 1, Acc2),
     {block(Ind, Kind, maps:get(name, N),
-           desc_stmt(maps:get(desc, N, ""), Ind + 1) ++ InTxt ++ OutTxt), Acc2}.
+           desc_stmt(maps:get(desc, N, ""), Ind + 1) ++ ExtTxt ++ InTxt ++ OutTxt), Acc3}.
 
 find_named(Kids, Name) ->
     case [K || K <- Kids, maps:get(name, K) =:= Name] of
@@ -467,6 +476,41 @@ if_feature_stmts(Opts, Ind) ->
     case proplists:get_value('if-feature', Opts) of
         undefined -> [];
         Feats -> [[pad(Ind), "if-feature ", quote_ident(F), ";\n"] || F <- Feats]
+    end.
+
+mgmtd_ext_stmts(N, Ind, Acc) ->
+    {CbTxt, Acc1} = data_callback_stmt(N, Ind, Acc),
+    {CodecTxt, Acc2} = codec_stmt(N, Ind, Acc1),
+    {UnkTxt, Acc3} = unknown_mgmtd_stmts(maps:get(opts, N, []), Ind, Acc2),
+    {CbTxt ++ CodecTxt ++ UnkTxt, Acc3}.
+
+data_callback_stmt(N, Ind, Acc) ->
+    case maps:get(data_callback, N, undefined) of
+        undefined -> {[], Acc};
+        mgmtd -> {[], Acc};
+        Mod when is_atom(Mod) ->
+            {[pad(Ind), "mgmtd:data-callback ", quote_str(atom_to_list(Mod)), ";\n"],
+             need_import(Acc, ?MGMTD, "mgmtd")}
+    end.
+
+codec_stmt(N, Ind, Acc) ->
+    case proplists:get_value(codec, maps:get(opts, N, [])) of
+        undefined -> {[], Acc};
+        Mod when is_atom(Mod) ->
+            {[pad(Ind), "mgmtd:codec ", quote_str(atom_to_list(Mod)), ";\n"],
+             need_import(Acc, ?MGMTD, "mgmtd")}
+    end.
+
+unknown_mgmtd_stmts(Opts, Ind, Acc) ->
+    Stmts = [{Name, Arg} || {mgmtd, Name, Arg} <- Opts],
+    case Stmts of
+        [] ->
+            {[], Acc};
+        _ ->
+            {[[pad(Ind), "mgmtd:", atom_to_list(Name), $ ,
+               quote_str(to_list(Arg)), ";\n"]
+              || {Name, Arg} <- Stmts],
+             need_import(Acc, ?MGMTD, "mgmtd")}
     end.
 
 list_extras(N, Ind) ->

@@ -11,6 +11,7 @@ snapshot_test_() ->
      [fun empty_without_schema/0,
       fun default_and_named_prefix/0,
       fun list_keys_and_leaf_types/0,
+      fun rpc_operations_paths/0,
       fun http_get_schema/0,
       fun http_head_and_options/0]}.
 
@@ -92,6 +93,26 @@ list_keys_and_leaf_types() ->
                             find(<<"name">>, <<"client">>,
                                  maps:get(<<"children">>, Default)))),
     ?assertEqual([<<"host">>, <<"port">>], maps:get(<<"key_names">>, Clients)),
+    lists:foreach(fun mgmtd:remove_schema/1, mgmtd:registered_schemas()).
+
+rpc_operations_paths() ->
+    ok = mgmtd:load_yang_module("test/yang/example-rpc.yang"),
+    #{<<"modules">> := Mods} = mgmtd_ui_schema:snapshot(),
+    RpcMod = find(<<"name">>, <<"example-rpc">>, Mods),
+    Kids = maps:get(<<"children">>, RpcMod),
+    Names = [maps:get(<<"name">>, C) || C <- Kids],
+    ?assert(lists:member(<<"echo">>, Names)),
+    ?assert(lists:member(<<"box">>, Names)),
+    Echo = find(<<"name">>, <<"echo">>, Kids),
+    ?assertEqual(<<"rpc">>, maps:get(<<"kind">>, Echo)),
+    ?assertEqual(<<"/restconf/operations/example-rpc:echo">>,
+                 maps:get(<<"path">>, Echo)),
+    Input = find(<<"name">>, <<"input">>, maps:get(<<"children">>, Echo)),
+    In = find(<<"name">>, <<"in">>, maps:get(<<"children">>, Input)),
+    ?assertEqual(<<"leaf">>, maps:get(<<"kind">>, In)),
+    Box = find(<<"name">>, <<"box">>, Kids),
+    ?assertEqual(<<"container">>, maps:get(<<"kind">>, Box)),
+    ?assertEqual(<<"/restconf/data/example-rpc:box">>, maps:get(<<"path">>, Box)),
     lists:foreach(fun mgmtd:remove_schema/1, mgmtd:registered_schemas()).
 
 http_get_schema() ->
